@@ -1,122 +1,206 @@
-import pandas as pd
-import numpy as np
+"""
+run_learning_cycle.py
+=====================
+
+Orchestration with confidence-gated writeback and probability columns.
+- Prediction probabilities are written back as Flag_<target>_prob with 1.0 = certain GOOD.
+- Auto-write: only commit predicted flags when model confidence is high (>= HIGH_THRESH)
+  or low (<= LOW_THRESH). Others are left untouched and recorded in a review CSV.
+- Reading is robust to presence or absence of existing Flag_<target>_prob columns.
+"""
+
 import os
 import glob
+import pandas as pd
+import numpy as np
+
 from solar_features import add_features
 from solar_model import SolarHybridModel
 
-# --- CONFIGURATION ---
-DATA_FOLDER = 'data'
-TS_COL = 'YYYY-MM-DD--HH:MM:SS' 
-HEADER_ROWS = 43 
 
-def load_and_prep_data(file_paths):
-    df_list = []
-    print(f"Loading {len(file_paths)} files...")
+# ---------------- CONFIG ----------------
+DATA_FOLDER = 'data'
+HEADER_ROWS = 43
+TS_COL = 'YYYY-MM-DD--HH:MM:SS'
+
+SITE_CONFIG = {
+    'latitude': 47.654,     # <-- SET ME
+    'longitude': -122.309,  # <-- SET ME
+    'altitude': 70,   # meters (optional)
+    'timezone': 'Etc/GMT+8'
+}
+
+# confidence thresholds for auto-write (tunable)
+HIGH_THRESH = 0.98  # prob >= HIGH_THRESH => auto write GOOD
+LOW_THRESH = 0.02   # prob <= LOW_THRESH  => auto write BAD
+
+REVIEW_OUT = 'review_requests.csv'  # appended with rows needing manual review
+
+
+# ---------------- I/O helpers ----------------
+def load_csvs(file_paths):
+    frames = []
     for f in file_paths:
         try:
-            temp = pd.read_csv(f, skiprows=HEADER_ROWS)
-            temp.columns = [c.strip() for c in temp.columns]
-            
-            temp['_raw_ts'] = temp[TS_COL].astype(str).str.strip()
-            temp['Timestamp_dt'] = pd.to_datetime(temp['_raw_ts'], format='%Y-%m-%d--%H:%M:%S')
-            temp['_source_file'] = f 
-            df_list.append(temp)
+            df = pd.read_csv(f, skiprows=HEADER_ROWS)
+            df.columns = [c.strip() for c in df.columns]
+            df['_source_file'] = f
+            # Make sure timestamp column exists and raw ts col
+            if TS_COL in df.columns:
+                df['_raw_ts'] = df[TS_COL].astype(str).str.strip()
+            else:
+                # fallback: first column
+                df['_raw_ts'] = df.iloc[:, 0].astype(str).str.strip()
+            frames.append(df)
         except Exception as e:
             print(f"Skipping {f}: {e}")
-    
-    full_df = pd.concat(df_list, ignore_index=True)
-    full_df = add_features(full_df)
-    full_df.index = full_df['Timestamp_dt']
-    return full_df
+    if len(frames) == 0:
+        return pd.DataFrame()
+    out = pd.concat(frames, ignore_index=True)
+    return out
 
-def write_flags_to_csv(df_subset, target_col):
+
+def write_back(df_preds: pd.DataFrame, target_col: str):
     """
-    Writes predictions back to CSVs.
+    Write predicted flags back to source CSVs based on confidence gating.
+
+    For each grouped file, update only timestamps where auto-write decisions
+    were made. Predictions with intermediate confidence are saved to REVIEW_OUT
+    for manual labeling and are NOT written back to CSV.
+
+    df_preds is expected to contain columns:
+      - _source_file, _raw_ts, target_col, target_prob (Flag_<target>_prob)
+      - optional 'AutoWrite' boolean column indicating whether to commit
     """
-    total_changed = 0
-    bad_count = (df_subset[target_col] == 99).sum()
-    print(f"    -> Writing updates... (Includes {bad_count} 'Bad' flags)")
+    review_rows = []
 
-    for file_path, group in df_subset.groupby('_source_file'):
-        original_data = pd.read_csv(file_path, skiprows=HEADER_ROWS)
-        original_data.columns = [c.strip() for c in original_data.columns]
-        
-        new_flags_map = group.set_index('_raw_ts')[target_col].to_dict()
-        
-        def update_val(row):
-            ts = str(row[TS_COL]).strip()
-            old_val = row[target_col] if not pd.isna(row[target_col]) else 0
-            if ts in new_flags_map:
-                new_val = new_flags_map[ts]
-                return new_val, (1 if new_val != old_val else 0)
-            return old_val, 0
+    for path, g in df_preds.groupby('_source_file'):
+        try:
+            orig = pd.read_csv(path, skiprows=HEADER_ROWS)
+            orig.columns = [c.strip() for c in orig.columns]
+        except Exception as e:
+            print(f"Failed to open {path} for writing: {e}")
+            continue
 
-        results = [update_val(row) for _, row in original_data.iterrows()]
-        
-        new_column_values = [r[0] for r in results]
-        total_changed += sum(r[1] for r in results)
-        
-        original_data[target_col] = new_column_values
-        original_data[target_col] = original_data[target_col].fillna(0).astype(int)
+        # Build mapping only for rows where AutoWrite == True
+        if 'AutoWrite' in g.columns:
+            to_write = g[g['AutoWrite'] == True]
+        else:
+            # fallback: write where prob is extreme
+            prob_col = f"{target_col}_prob"
+            if prob_col in g.columns:
+                pw = g[(g[prob_col] >= HIGH_THRESH) | (g[prob_col] <= LOW_THRESH)]
+                to_write = pw.copy()
+            else:
+                to_write = g.copy()
 
-        with open(file_path, 'r') as f:
-            header_lines = [next(f) for _ in range(HEADER_ROWS)]
-            
-        with open(file_path, 'w', newline='') as f:
-            f.writelines(header_lines)
-            original_data.to_csv(f, index=False)
-            
-    print(f"    -> Total flags changed for {target_col}: {total_changed}")
+        write_map = to_write.set_index('_raw_ts')[target_col].to_dict()
 
-def run_cycle(train_start, train_end, pred_start, pred_end, target_flags):
-    print(f"--- Starting Active Learning Cycle ---")
-    all_files = sorted(glob.glob(os.path.join(DATA_FOLDER, '**', '*.csv'), recursive=True))
-    
-    full_dataset = load_and_prep_data(all_files)
-    
-    # --- TRAINING DATA ---
-    print(f"Training Period: {train_start} to {train_end}")
-    train_mask = (full_dataset.index >= pd.to_datetime(train_start)) & \
-                 (full_dataset.index <= pd.to_datetime(train_end))
-    train_df = full_dataset[train_mask]
-    
-    # --- PREDICTION DATA (Loaded ONCE, updated in memory) ---
-    print(f"Prediction Period: {pred_start} to {pred_end}")
-    pred_mask = (full_dataset.index >= pd.to_datetime(pred_start)) & \
-                (full_dataset.index <= pd.to_datetime(pred_end))
-    pred_df = full_dataset[pred_mask].copy()
-    
-    if len(train_df) == 0 or len(pred_df) == 0:
-        print("Error: Missing data for selected date ranges.")
+        # Update original data only for timestamps in write_map
+        def upd(row):
+            ts = str(row[TS_COL]).strip() if TS_COL in row.index else str(row.iloc[0]).strip()
+            if ts in write_map:
+                return write_map[ts]
+            return row.get(target_col, row.get(target_col, 0))
+
+        orig[target_col] = orig.apply(upd, axis=1)
+
+        # Ensure we preserve any existing prob column; else add it as NaNs
+        prob_col = f"{target_col}_prob"
+        if prob_col in g.columns:
+            prob_map = g.set_index('_raw_ts')[prob_col].to_dict()
+            def upd_prob(row):
+                ts = str(row[TS_COL]).strip() if TS_COL in row.index else str(row.iloc[0]).strip()
+                return prob_map.get(ts, row.get(prob_col, np.nan))
+            orig[prob_col] = orig.apply(upd_prob, axis=1)
+        else:
+            # add NA prob column
+            orig[prob_col] = np.nan
+
+        # Write the file with original header preserved
+        try:
+            with open(path, 'r') as f:
+                header_lines = [next(f) for _ in range(HEADER_ROWS)]
+            with open(path, 'w', newline='') as f:
+                f.writelines(header_lines)
+                orig.to_csv(f, index=False)
+        except Exception as e:
+            print(f"Failed writing back to {path}: {e}")
+
+        # Record review rows (those not auto-written within this file)
+        not_written = g[~g['_raw_ts'].isin(to_write['_raw_ts'])]
+        if not not_written.empty:
+            review_rows.append(not_written.assign(_source_file_write=path))
+
+    # Append reviews to REVIEW_OUT
+    if len(review_rows) > 0:
+        df_reviews = pd.concat(review_rows, ignore_index=True)
+        if os.path.exists(REVIEW_OUT):
+            df_reviews.to_csv(REVIEW_OUT, mode='a', header=False, index=False)
+        else:
+            df_reviews.to_csv(REVIEW_OUT, index=False)
+
+
+# ---------------- Main cycle ----------------------------------------------
+
+def run_cycle(train_start: str, train_end: str, pred_start: str, pred_end: str, targets: list[str]):
+    files = sorted(glob.glob(os.path.join(DATA_FOLDER, '**', '*.csv'), recursive=True))
+    raw = load_csvs(files)
+    if raw.empty:
+        print('No files found')
         return
 
-    for target in target_flags:
-        print(f"\n=== Processing {target} ===")
-        
-        if target not in train_df.columns:
-            print(f"Skipping {target}: Column missing.")
-            continue
-            
-        # Initialize fresh model for this target
-        model = SolarHybridModel()
-        model.fit(train_df, target_col=target)
-        
-        print(f"Predicting {target}...")
-        
-        # Note: Pass the 'pred_df' which might have updates from previous loops
-        # (Though currently we aren't using Flag_X as a feature for Flag_Y, 
-        # this structure allows it if we add it to features_map later)
-        new_flags = model.predict(pred_df, target_col=target)
-        pred_df[target] = new_flags
-        
-        # Write to disk immediately
-        write_flags_to_csv(pred_df, target)
+    full = add_features(raw, SITE_CONFIG)
+    full.index = full['Timestamp_dt']
 
-if __name__ == "__main__":
-    TARGETS = ['Flag_DNI', 'Flag_DHI', 'Flag_GHI'] 
-    
-    TRAIN_S, TRAIN_E = "2025-01-01 00:00:00", "2025-03-31 23:59:00"
-    PRED_S,  PRED_E  = "2025-04-01 00:00:00", "2025-06-30 23:59:00"
-    
-    run_cycle(TRAIN_S, TRAIN_E, PRED_S, PRED_E, TARGETS)
+    train_mask = (full.index >= pd.to_datetime(train_start)) & (full.index <= pd.to_datetime(train_end))
+    pred_mask = (full.index >= pd.to_datetime(pred_start)) & (full.index <= pd.to_datetime(pred_end))
+
+    train_df = full[train_mask].copy()
+    pred_df = full[pred_mask].copy()
+
+    if train_df.empty or pred_df.empty:
+        raise RuntimeError('Training or prediction slice empty')
+
+    for t in targets:
+        print(f"=== Training and predicting {t} ===")
+        model = SolarHybridModel()
+        # fit model
+        model.fit(train_df, target_col=t)
+
+        # If the unsupervised detector exists, score pred_df and add IF_Score
+        if getattr(model, 'if_det', None) is not None:
+            try:
+                pred_df['IF_Score'] = model.if_det.decision_function(pred_df[model.common_features].fillna(0.0))
+            except Exception:
+                pred_df['IF_Score'] = 0.0
+
+        # Predict with probabilities
+        flags, probs = model.predict(pred_df, t, do_return_probs=True)
+        prob_col = f"{t}_prob"
+        pred_df[t] = flags
+        pred_df[prob_col] = probs  # 1.0 == GOOD
+
+        # Decide auto-write by thresholding
+        pred_df['AutoWrite'] = False
+        pred_df.loc[pred_df[prob_col] >= HIGH_THRESH, 'AutoWrite'] = True
+        pred_df.loc[pred_df[prob_col] <= LOW_THRESH, 'AutoWrite'] = True
+
+        # Ensure _source_file and _raw_ts exist in pred_df for mapping
+        if '_source_file' not in pred_df.columns or '_raw_ts' not in pred_df.columns:
+            raise RuntimeError('Pred dataframe missing source info')
+
+        # Write back committed flags & probabilities
+        write_back(pred_df[['_source_file', '_raw_ts', t, prob_col, 'AutoWrite']], t)
+
+
+# ----------------- Entry point -------------------------------------------
+if __name__ == '__main__':
+    TARGETS = ['Flag_GHI', 'Flag_DNI', 'Flag_DHI']
+
+    TRAIN_START = '2025-01-01 00:00:00'
+    TRAIN_END = '2025-03-31 23:59:59'
+    PRED_START = '2025-04-01 00:00:00'
+    PRED_END = '2025-06-30 23:59:59'
+
+    run_cycle(TRAIN_START, TRAIN_END, PRED_START, PRED_END, TARGETS)
