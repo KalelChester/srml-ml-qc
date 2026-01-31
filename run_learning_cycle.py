@@ -31,8 +31,8 @@ SITE_CONFIG = {
 }
 
 # confidence thresholds for auto-write (tunable)
-HIGH_THRESH = 0.98  # prob >= HIGH_THRESH => auto write GOOD
-LOW_THRESH = 0.02   # prob <= LOW_THRESH  => auto write BAD
+HIGH_THRESH = 0.80  # prob >= HIGH_THRESH => auto write GOOD
+LOW_THRESH = 0.20   # prob <= LOW_THRESH  => auto write BAD
 
 REVIEW_OUT = 'review_requests.csv'  # appended with rows needing manual review
 

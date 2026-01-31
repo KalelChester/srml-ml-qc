@@ -25,6 +25,8 @@ from sklearn.ensemble import RandomForestClassifier, IsolationForest
 from sklearn.preprocessing import StandardScaler
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.utils.class_weight import compute_class_weight
+from sklearn.metrics import classification_report
+
 
 import tensorflow as tf
 import jax
@@ -98,11 +100,12 @@ class SolarHybridModel:
             'Timestamp_Num',
             'hour_sin', 'hour_cos',
             'doy_sin', 'doy_cos',
-            'zenith', 'elevation',
+            'SZA', 'elevation',
             'CSI',
             'QC_PhysicalFail',
             'CorrFeat_GHI', 'CorrFeat_DNI', 'CorrFeat_DHI',
-            'GHI', 'DNI', 'DHI'
+            'GHI', 'DNI', 'DHI',
+            'GHI_Clear', 'DNI_Clear', 'DHI_Clear'
         ]
 
     # ---------------- internal utilities ---------------------------------
@@ -238,7 +241,6 @@ class SolarHybridModel:
 
         # ---------------- synthetic augmentation (optional) -------------------
         if synthetic_frac > 0.0:
-            from copy import deepcopy
             # use features only (we will not attempt to alter label column in this function)
             # create synthetic rows by perturbing X_stack copies (not the original df)
             n_make = max(1, int(synthetic_frac * len(X_stack)))
@@ -265,8 +267,8 @@ class SolarHybridModel:
                         row['GHI'] = 0.95 * float(X_stack.at[i, 'GHI_Clear']) if 'GHI_Clear' in X_stack.columns else float(row['GHI'] * 0.95)
                 else:
                     # drift proportional to zenith
-                    if 'zenith' in row.index:
-                        row['GHI'] = float(row.get('GHI', 0.0) + (90.0 - float(row.get('zenith', 90.0))) * 0.1)
+                    if 'SZA' in row.index:
+                        row['GHI'] = float(row.get('GHI', 0.0) + (90.0 - float(row.get('SZA', 90.0))) * 0.1)
                 synth_rows.append(row)
             if synth_rows:
                 X_extra = pd.DataFrame(synth_rows).reset_index(drop=True)
@@ -324,7 +326,6 @@ class SolarHybridModel:
         logits = self.nn_state.apply_fn({'params': self.nn_state.params}, X_scaled)
         preds = jnp.argmax(logits, axis=1)
         try:
-            from sklearn.metrics import classification_report
             print("    [fit] NN training classification report (on stacked dataset):")
             print(classification_report(y_arr, np.array(preds), target_names=['BAD', 'GOOD'], digits=4))
         except Exception:

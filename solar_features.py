@@ -5,8 +5,7 @@ solar_features.py
 Feature engineering and deterministic-quality-control utilities for
 solar irradiance time-series data.
 
-This file is intended to be a production-ready, developer-friendly module
-that converts raw CSV rows into a stable set of numerical features used by
+This file is intended to convert raw CSV rows into a stable set of numerical features used by
 the supervised / unsupervised models.
 
 Design goals and constraints:
@@ -115,7 +114,7 @@ def bs_rn_qc(df: pd.DataFrame,
              ghi_col: str = 'GHI',
              dni_col: str = 'DNI',
              dhi_col: str = 'DHI',
-             zenith_col: str = 'zenith') -> np.ndarray:
+             zenith_col: str = 'SZA') -> np.ndarray:
     """
     Minimal BSRN-style deterministic tests used as a feature.
 
@@ -184,7 +183,7 @@ def add_clearsky_features(df: pd.DataFrame,
 
     # Provide safe defaults if pvlib is not available.
     if not _HAS_PVLIB:
-        for c in ['GHI_Clear', 'DNI_Clear', 'DHI_Clear', 'CSI', 'zenith', 'elevation']:
+        for c in ['GHI_Clear', 'DNI_Clear', 'DHI_Clear', 'CSI', 'elevation']:
             df[c] = 0.0
         return df
 
@@ -217,14 +216,12 @@ def add_clearsky_features(df: pd.DataFrame,
     df['GHI_Clear'] = 0.0
     df['DNI_Clear'] = 0.0
     df['DHI_Clear'] = 0.0
-    df['zenith'] = 90.0
     df['elevation'] = 0.0
 
     # Fill only valid positions
     df.loc[valid_mask, 'GHI_Clear'] = clearsky['ghi'].values
     df.loc[valid_mask, 'DNI_Clear'] = clearsky['dni'].values
     df.loc[valid_mask, 'DHI_Clear'] = clearsky['dhi'].values
-    df.loc[valid_mask, 'zenith'] = solarpos['zenith'].values
     df.loc[valid_mask, 'elevation'] = solarpos['elevation'].values
 
     # Clear-sky index (CSI) robustly calculated and clipped
@@ -286,8 +283,8 @@ def inject_synthetic_anomalies(df: pd.DataFrame, frac: float = 0.01, seed: int =
                 out.at[out.index[i], col] = out.at[out.index[i], col] + float(rng.uniform(300, 800))
         # drift: small offset proportional to zenith
         else:
-            if 'GHI' in out.columns and 'zenith' in out.columns:
-                out.at[out.index[i], 'GHI'] = out.at[out.index[i], 'GHI'] + (90.0 - out.at[out.index[i], 'zenith']) * 0.1
+            if 'GHI' in out.columns and 'SZA' in out.columns:
+                out.at[out.index[i], 'GHI'] = out.at[out.index[i], 'GHI'] + (90.0 - out.at[out.index[i], 'SZA']) * 0.1
 
     return out
 
@@ -358,7 +355,7 @@ def add_features(df: pd.DataFrame, site_cfg: Optional[Dict] = None) -> pd.DataFr
             temp[f'CorrFeat_{c}'] = correlation_feature(temp, c, span=5)
 
     # Deterministic QC as a feature
-    temp['QC_PhysicalFail'] = bs_rn_qc(temp) if 'zenith' in temp.columns else 0
+    temp['QC_PhysicalFail'] = bs_rn_qc(temp) if 'SZA' in temp.columns else 0
 
     # Final safety cleanup: no NaN/inf remain
     temp = temp.replace([np.inf, -np.inf], 0.0).fillna(0.0)
