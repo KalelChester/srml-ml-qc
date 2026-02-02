@@ -1,0 +1,8 @@
+parameter,value
+rf_n_estimators,50
+rf_max_depth,50
+rf_min_samples_leaf,1
+nn_layers,"(128, 64, 32)"
+nn_learning_rate,0.00001
+nn_batch_size,64
+nn_epochs,20

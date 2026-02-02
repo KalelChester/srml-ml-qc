@@ -78,8 +78,9 @@ class SolarHybridModel:
     def __init__(self):
         # Base tree model
         self.rf = RandomForestClassifier(
-            n_estimators=200,
-            min_samples_leaf=4,
+            n_estimators=50,
+            min_samples_leaf=1,
+            max_depth=50,
             class_weight='balanced_subsample',  # helps with time-chunked imbalance
             n_jobs=-1,
             random_state=42
@@ -127,8 +128,8 @@ class SolarHybridModel:
     def fit(self,
             df: pd.DataFrame,
             target_col: str,
-            epochs: int = 10,
-            batch_size: int = 128,
+            epochs: int = 20,
+            batch_size: int = 64,
             upsample_min_bad: int = 500,
             synthetic_frac: float = 0.0):
         """

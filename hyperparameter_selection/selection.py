@@ -10,9 +10,6 @@ OPTIMIZED ARCHITECTURE:
 3. Iterates through Model Hyperparameters (Grid Search).
 4. Performs K-Fold CV on the pre-processed data.
 
-This setup is significantly faster for tuning Neural Network and Random Forest 
-parameters because it avoids recalculating rolling correlations and solar 
-geometry for every iteration.
 """
 
 import os
@@ -48,11 +45,11 @@ HYPER_FILE = 'hyperparameters.csv'
 LOG_FILE = 'feature_performance.log'
 
 # ----------------- TEST CONFIGURATION (EDIT HERE) -----------------
-# Examples: 'nn_learning_rate', 'rf_n_estimators', 'nn_layers', 'nn_batch_size'
-PARAM_TO_TEST = 'nn_learning_rate'
+# Examples: rf_n_estimators,rf_max_depth, rf_min_samples_leaf, nn_layers, nn_learning_rate, nn_batch_size, nn_epochs
+PARAM_TO_TEST = 'nn_epochs'
 
 # Select the range of values to test for this parameter
-TEST_VALUES = [0.01, 0.005, 0.001, 0.0001]
+TEST_VALUES = [5, 10, 20, 50]
 
 SITE_CONFIG = {
     'latitude': 47.654,     # <-- SET ME
@@ -124,13 +121,9 @@ def run_selection_cycle():
         print("No data found in 'data' folder.")
         return
 
-    # 3. Generate Features ONCE (The Speedup)
+    # 3. Generate Features ONCE
     print("Generating features (Static)...")
-    # We do NOT pass 'params' here anymore, using standard defaults/logic in solar_features
     df_full = add_features(raw_df, SITE_CONFIG)
-    
-    # Pre-filter for valid targets to save memory/time in loop if possible, 
-    # but strictly we need to respect K-Fold indices, so we keep full structure.
     print(f"Feature generation complete. Shape: {df_full.shape}")
     
     print(f"\nStarting Grid Search for: {PARAM_TO_TEST}")
@@ -167,8 +160,7 @@ def run_selection_cycle():
             if train_labeled.empty or val_labeled.empty:
                 continue
 
-            # Instantiate Model with current params
-            # The model handles the already-generated features automatically
+            # Instantiate Model
             model = SolarHybridModel(params=current_params)
             
             # Fit
@@ -177,9 +169,7 @@ def run_selection_cycle():
             # Predict
             flags = model.predict(val_labeled, TARGET)
             
-            # Evaluation
-            # Map 99(BAD)->0, 1(GOOD)->1 for sklearn metrics
-            y_true = np.where(val_labeled[TARGET] == 1, 1, 0)
+            y_true = np.where(val_labeled[TARGET] == 99, 0, 1)
             y_pred = np.where(flags == 1, 1, 0)
             
             # Standard Metrics
@@ -188,7 +178,7 @@ def run_selection_cycle():
             f1 = f1_score(y_true, y_pred, zero_division=0)
             acc = accuracy_score(y_true, y_pred)
             
-            # Modified Accuracy Calculation
+            # Modified Accuracy
             prop_0 = np.mean(y_true == 0)
             prop_1 = np.mean(y_true == 1)
             balance = max(prop_0, prop_1)
@@ -212,18 +202,21 @@ def run_selection_cycle():
         # 7. Logging
         log_entry = (
             f"PARAM: {PARAM_TO_TEST}={val} | "
-            f"F1: {avg_f1:.4f} | "
-            f"ModAcc: {avg_mod_acc:.4f} | "
-            f"Prec: {avg_p:.4f} | "
-            f"Rec: {avg_r:.4f} | "
+            f"F1: {avg_f1:.6f} | "
+            f"ModAcc: {avg_mod_acc:.6f} | "
+            f"Prec: {avg_p:.6f} | "
+            f"Rec: {avg_r:.6f} | "
             f"FullParams: {current_params}"
         )
         
-        print(f"   >>> Result: F1={avg_f1:.4f}, ModAcc={avg_mod_acc:.4f}")
+        print(f"   >>> Result: F1={avg_f1:.6f}, ModAcc={avg_mod_acc:.6f}")
         
         with open(LOG_FILE, 'a') as f:
             f.write(log_entry + "\n")
 
+    with open(LOG_FILE, 'a') as f:
+            f.write("\n")
+            
     print(f"\nCompleted testing for {PARAM_TO_TEST}. Check {LOG_FILE} for details.")
 
 if __name__ == '__main__':
