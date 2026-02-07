@@ -20,6 +20,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 from typing import Optional, Tuple
+import pickle
+import os
 
 from sklearn.ensemble import RandomForestClassifier, IsolationForest
 from sklearn.preprocessing import StandardScaler
@@ -440,3 +442,95 @@ class SolarHybridModel:
             return flags, probs_good
 
         return flags
+
+    # ---------------- save/load model ------------------------------------
+    def save_model(self, filepath: str):
+        """
+        Save the trained model to disk.
+        
+        The model is saved as a pickle file containing:
+        - RF classifier
+        - Calibrated RF (if available)
+        - IsolationForest detector (if available)
+        - StandardScaler
+        - NN params (JAX pytree)
+        - Common features list
+        
+        Parameters
+        ----------
+        filepath : str
+            Path to save the model (e.g., 'models/solar_qc_model.pkl')
+        """
+        # Ensure directory exists
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        
+        # Extract NN params if state exists
+        nn_params = None
+        if self.nn_state is not None:
+            nn_params = self.nn_state.params
+        
+        # Package all components
+        model_dict = {
+            'rf': self.rf,
+            'rf_cal': self.rf_cal,
+            'if_det': self.if_det,
+            'scaler': self.scaler,
+            'nn_params': nn_params,
+            'common_features': self.common_features,
+            'version': '1.0'  # for future compatibility
+        }
+        
+        with open(filepath, 'wb') as f:
+            pickle.dump(model_dict, f)
+        
+        print(f"Model saved to {filepath}")
+    
+    @classmethod
+    def load_model(cls, filepath: str) -> 'SolarHybridModel':
+        """
+        Load a trained model from disk.
+        
+        Parameters
+        ----------
+        filepath : str
+            Path to the saved model file
+        
+        Returns
+        -------
+        SolarHybridModel
+            Loaded model ready for prediction
+        """
+        if not os.path.exists(filepath):
+            raise FileNotFoundError(f"Model file not found: {filepath}")
+        
+        with open(filepath, 'rb') as f:
+            model_dict = pickle.load(f)
+        
+        # Create new instance
+        model = cls()
+        
+        # Restore components
+        model.rf = model_dict['rf']
+        model.rf_cal = model_dict['rf_cal']
+        model.if_det = model_dict['if_det']
+        model.scaler = model_dict['scaler']
+        model.common_features = model_dict['common_features']
+        
+        # Restore NN state
+        nn_params = model_dict.get('nn_params')
+        if nn_params is not None:
+            # Recreate the NN model and state
+            rng = jax.random.PRNGKey(42)
+            nn_model = DenseNN()
+            # Get feature dimensionality from scaler
+            n_features = model.scaler.n_features_in_
+            
+            # Create state with loaded params
+            model.nn_state = train_state.TrainState.create(
+                apply_fn=nn_model.apply,
+                params=nn_params,
+                tx=optax.adam(1e-3)  # optimizer not needed for inference but required for state
+            )
+        
+        print(f"Model loaded from {filepath}")
+        return model

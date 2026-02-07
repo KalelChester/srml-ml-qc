@@ -935,6 +935,19 @@ class gui_functions:
         """Update the X-axis variable for plotting."""
         log_button_click(f'update_x_axis_{value}')
         plot_vars['x_values'] = gui_vars['x_mapping'][value]
+        
+        # When switching x-axis, ensure proper axis limits are set
+        if value == 'Time':
+            gui_vars['ax'][0].set_xlim(plot_vars['dt_ll'], plot_vars['dt_ul'])
+        elif value == 'ZEN':
+            gui_vars['ax'][0].set_xlim(plot_vars['zen_ll'], plot_vars['zen_ul'])
+        elif value == 'AZM':
+            gui_vars['ax'][0].set_xlim(plot_vars['azm_ll'], plot_vars['azm_ul'])
+        elif value == 'GHI':
+            gui_vars['ax'][0].set_xlim(plot_vars['ghi_ll'], plot_vars['ghi_ul'])
+        elif value == 'Temperature':
+            gui_vars['ax'][0].set_xlim(plot_vars['at_ll'], plot_vars['at_ul'])
+        
         update_plot(gui_vars, plot_vars, df)
     
     @staticmethod
@@ -1025,6 +1038,11 @@ class gui_functions:
             plot_vars['toggle_bad_x'] = True
             
             event_xdata = event.xdata
+            
+            # Check if mouse was released outside plot area
+            if event_xdata is None or event.ydata is None or plot_vars['rect_x_min'] is None or plot_vars['rect_y_min'] is None:
+                log_button_click('Mouse released outside plot area, ignoring selection')
+                return
             
             # Sort rectangle coordinates
             plot_vars['rect_x_min'], plot_vars['rect_x_max'] = sorted([

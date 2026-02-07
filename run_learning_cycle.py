@@ -20,6 +20,7 @@ from solar_model import SolarHybridModel
 
 # ---------------- CONFIG ----------------
 DATA_FOLDER = 'data'
+MODEL_FOLDER = 'models'  # Folder to save trained models
 HEADER_ROWS_SKIP = 43  # Number of rows to skip when reading (skips rows 0-42, uses row 43 as column names)
 HEADER_ROWS_PRESERVE = 44  # Number of rows to preserve when writing back (rows 0-43 including column names)
 TS_COL = 'YYYY-MM-DD--HH:MM:SS'
@@ -180,6 +181,10 @@ def run_cycle(train_start: str, train_end: str, pred_start: str, pred_end: str, 
         model = SolarHybridModel()
         # fit model
         model.fit(train_df, target_col=t)
+
+        # Save the trained model
+        model_filename = os.path.join(MODEL_FOLDER, f'model_{t}.pkl')
+        model.save_model(model_filename)
 
         # If the unsupervised detector exists, score pred_df and add IF_Score
         if getattr(model, 'if_det', None) is not None:
