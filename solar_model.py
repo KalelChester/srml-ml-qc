@@ -101,9 +101,8 @@ class SolarHybridModel:
             'Timestamp_Num',
             'hour_sin', 'hour_cos',
             'doy_sin', 'doy_cos',
-            'SZA', 'elevation',
-            'CSI',
-            'QC_PhysicalFail',
+            'SZA', 'elevation', 'CSI',
+            'QC_PhysicalFail', 'Temperature',
             'CorrFeat_GHI', 'CorrFeat_DNI', 'CorrFeat_DHI',
             'GHI', 'DNI', 'DHI',
             'GHI_Clear', 'DNI_Clear', 'DHI_Clear'

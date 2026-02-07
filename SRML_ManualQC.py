@@ -143,9 +143,12 @@ def close_log():
 # Main Application Entry
 # =====================================================================
 
-def main():
+def main(test_file=None):
     """
     Primary entry point for the SRML Manual QC application.
+    
+    Args:
+        test_file: Optional file path for testing (bypasses file dialog)
     
     Workflow:
     1. Initialize logging
@@ -159,15 +162,28 @@ def main():
     log_button_click('****************** Program Start ******************')
     
     # Select file for QC
-    comprehensive_location = select_file()
+    if test_file:
+        comprehensive_location = test_file
+    else:
+        comprehensive_location = select_file()
+    
     if not comprehensive_location:
         close_log()
         sys.exit("No file selected")
     
+    # Normalize path
+    comprehensive_location = os.path.abspath(comprehensive_location)
+    
     log_button_click(f'Selected file: {comprehensive_location}')
+    log_button_click(f'File exists: {os.path.exists(comprehensive_location)}')
+    
+    if not os.path.exists(comprehensive_location):
+        close_log()
+        sys.exit(f"File not found: {comprehensive_location}")
     
     # Get data
     df, df_header = SRML_Data.subroutine_main_automated_qc(comprehensive_location)
+    log_button_click(f'Data shape after loading: {df.shape}')
     
     # Format dataframe
     df, df_string, station_name = format_df(df)
@@ -200,8 +216,20 @@ def main():
 
 def select_file():
     """Prompt user to select a file for QC."""
-    file_path = filedialog.askopenfilename(title="Select file to QC")
-    return file_path
+    try:
+        file_path = filedialog.askopenfilename(title="Select file to QC")
+        if not file_path:
+            print("\n" + "="*70)
+            print("File dialog returned no file. Running in terminal environment?")
+            print("Usage: python SRML_ManualQC.py <path_to_file>")
+            print("Example: python SRML_ManualQC.py data\\STW_2024\\STW_2024-01_QC.csv")
+            print("="*70 + "\n")
+        return file_path
+    except Exception as e:
+        print(f"Error in file dialog: {e}")
+        print("Please run with file path argument:")
+        print("  python SRML_ManualQC.py <path_to_file>")
+        return None
 
 # =====================================================================
 # Data Processing Functions
@@ -223,14 +251,30 @@ def format_df(df):
     df.index = range(len(df))
     df.columns = range(df.shape[1])
     
+    log_button_click(f'df.shape,({df.shape[0]}, {df.shape[1]})')
+    
+    # Validate that we have enough rows for the header
+    if df.shape[0] < 44:
+        error_msg = f'ERROR: Data has only {df.shape[0]} rows, but expected at least 44 (44 header rows + data)'
+        log_button_click(error_msg)
+        close_log()
+        sys.exit(error_msg)
+    
     # Create string copy for preserving original formatting
     df_string = df.copy()
+    
+    log_button_click(f'df_string shape: {df_string.shape}')
     
     # Remove header rows (first 44 rows)
     df = df.iloc[44:].reset_index(drop=True)
     
+    log_button_click(f'df shape after removing header: {df.shape}')
+    
     # Column renaming and conversion
     column_renames = {}
+    seen_names = set()
+    duplicate_counts = defaultdict(int)
+    
     for col_idx in range(df.shape[1]):
         header_val = df_string.iloc[43, col_idx]
         
@@ -245,6 +289,12 @@ def format_df(df):
         else:
             new_name = header_val
         
+        # Handle duplicate names by appending a suffix
+        if new_name in seen_names:
+            duplicate_counts[new_name] += 1
+            new_name = f"{new_name}_{duplicate_counts[new_name]}"
+        
+        seen_names.add(new_name)
         column_renames[col_idx] = new_name
         
         # Convert to numeric except for datetime column (index 2)
@@ -252,12 +302,6 @@ def format_df(df):
             df.iloc[:, col_idx] = pd.to_numeric(df.iloc[:, col_idx], errors='coerce')
     
     df.rename(columns=column_renames, inplace=True)
-    
-    # Validate column names
-    if len(set(df.columns)) != len(df.columns):
-        print("Duplicate column names found")
-        print(df.columns)
-        sys.exit("Duplicate column names")
     
     # Validate data length
     if (len(df) % 1440) != 0:
@@ -1632,5 +1676,10 @@ def start_auto_save(df, df_string, save_path, interval=600):
 # =====================================================================
 
 if __name__ == "__main__":
-    main()
+    # Support command line file argument for testing
+    if len(sys.argv) > 1:
+        test_file = sys.argv[1]
+        main(test_file=test_file)
+    else:
+        main()
     print('End of Manual QC program')

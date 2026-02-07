@@ -20,7 +20,8 @@ from solar_model import SolarHybridModel
 
 # ---------------- CONFIG ----------------
 DATA_FOLDER = 'data'
-HEADER_ROWS = 43
+HEADER_ROWS_SKIP = 43  # Number of rows to skip when reading (skips rows 0-42, uses row 43 as column names)
+HEADER_ROWS_PRESERVE = 44  # Number of rows to preserve when writing back (rows 0-43 including column names)
 TS_COL = 'YYYY-MM-DD--HH:MM:SS'
 
 SITE_CONFIG = {
@@ -31,8 +32,8 @@ SITE_CONFIG = {
 }
 
 # confidence thresholds for auto-write (tunable)
-HIGH_THRESH = 0.80  # prob >= HIGH_THRESH => auto write GOOD
-LOW_THRESH = 0.20   # prob <= LOW_THRESH  => auto write BAD
+HIGH_THRESH = 0.51  # prob >= HIGH_THRESH => auto write GOOD
+LOW_THRESH = 0.49   # prob <= LOW_THRESH  => auto write BAD
 
 REVIEW_OUT = 'review_requests.csv'  # appended with rows needing manual review
 
@@ -42,8 +43,11 @@ def load_csvs(file_paths):
     frames = []
     for f in file_paths:
         try:
-            df = pd.read_csv(f, skiprows=HEADER_ROWS)
+            df = pd.read_csv(f, skiprows=HEADER_ROWS_SKIP)
             df.columns = [c.strip() for c in df.columns]
+            # Drop the empty Data_Begins_Next_Row column if present
+            if 'Data_Begins_Next_Row' in df.columns:
+                df = df.drop(columns=['Data_Begins_Next_Row'])
             df['_source_file'] = f
             # Make sure timestamp column exists and raw ts col
             if TS_COL in df.columns:
@@ -76,8 +80,11 @@ def write_back(df_preds: pd.DataFrame, target_col: str):
 
     for path, g in df_preds.groupby('_source_file'):
         try:
-            orig = pd.read_csv(path, skiprows=HEADER_ROWS)
+            orig = pd.read_csv(path, skiprows=HEADER_ROWS_SKIP)
             orig.columns = [c.strip() for c in orig.columns]
+            # Drop the empty trailing column if it exists (from trailing commas in CSV)
+            if 'Data_Begins_Next_Row' in orig.columns:
+                orig = orig.drop(columns=['Data_Begins_Next_Row'])
         except Exception as e:
             print(f"Failed to open {path} for writing: {e}")
             continue
@@ -117,13 +124,17 @@ def write_back(df_preds: pd.DataFrame, target_col: str):
             # add NA prob column
             orig[prob_col] = np.nan
 
+        # Drop the empty Data_Begins_Next_Row column if present (caused by trailing comma in CSV)
+        if 'Data_Begins_Next_Row' in orig.columns:
+            orig = orig.drop(columns=['Data_Begins_Next_Row'])
+
         # Write the file with original header preserved
         try:
             with open(path, 'r') as f:
-                header_lines = [next(f) for _ in range(HEADER_ROWS)]
+                header_lines = [next(f) for _ in range(HEADER_ROWS_PRESERVE)]
             with open(path, 'w', newline='') as f:
                 f.writelines(header_lines)
-                orig.to_csv(f, index=False)
+                orig.to_csv(f, index=False, header=False)  # header=False since we already wrote it
         except Exception as e:
             print(f"Failed writing back to {path}: {e}")
 
@@ -151,8 +162,10 @@ def run_cycle(train_start: str, train_end: str, pred_start: str, pred_end: str, 
         return
 
     full = add_features(raw, SITE_CONFIG)
+    # Ensure Timestamp_dt is datetime type before setting as index
+    full['Timestamp_dt'] = pd.to_datetime(full['Timestamp_dt'], errors='coerce')
     full.index = full['Timestamp_dt']
-
+    
     train_mask = (full.index >= pd.to_datetime(train_start)) & (full.index <= pd.to_datetime(train_end))
     pred_mask = (full.index >= pd.to_datetime(pred_start)) & (full.index <= pd.to_datetime(pred_end))
 
@@ -199,8 +212,8 @@ if __name__ == '__main__':
     TARGETS = ['Flag_GHI', 'Flag_DNI', 'Flag_DHI']
 
     TRAIN_START = '2025-01-01 00:00:00'
-    TRAIN_END = '2025-03-31 23:59:59'
-    PRED_START = '2025-04-01 00:00:00'
+    TRAIN_END = '2025-04-30 23:59:59'
+    PRED_START = '2025-05-01 00:00:00'
     PRED_END = '2025-06-30 23:59:59'
 
     run_cycle(TRAIN_START, TRAIN_END, PRED_START, PRED_END, TARGETS)

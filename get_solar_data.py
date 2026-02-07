@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 import sys
 import time
+import warnings
 
 def subroutine_main_automated_qc(comprehensive_location):
     '''
@@ -12,48 +13,58 @@ def subroutine_main_automated_qc(comprehensive_location):
     '''
 
     # Load the comprehensive file
-    df = pd.read_csv(comprehensive_location, header = None, dtype=str)
+    # The metadata section (rows 0-43) has inconsistent column counts
+    # Read with error_bad_lines to handle this gracefully
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        df_full = pd.read_csv(comprehensive_location, header=None, dtype=str, 
+                              on_bad_lines='skip', engine='c')
+    df_header = df_full.iloc[:44].copy()
+    df = df_full.iloc[44:].copy()  # Make a copy to avoid SettingWithCopyWarning
 
     # The EUO PIR columns got mixed up. 
     # Change the order of them
     if ('EUO' in comprehensive_location) & ('2024' in comprehensive_location):
-        print(df.iloc[0,33:37])
+        print(df_header.iloc[0,33:37])
         
-        if ('PIR' in df.iloc[0, 33]) & ('PIR' in df.iloc[0, 34]) & ('PIR' in df.iloc[0, 35]) & ('PIR' in df.iloc[0, 36]):
+        if ('PIR' in df_header.iloc[0, 33]) & ('PIR' in df_header.iloc[0, 34]) & ('PIR' in df_header.iloc[0, 35]) & ('PIR' in df_header.iloc[0, 36]):
 
-            df.iloc[0:4, 33] = ['PIR_NET_I', '7008', 'PIR(30923F3)_NET_I', 'PIR_Net_I']
-            df.iloc[43, 33] = 'PIR_NET_I'
+            df_header.iloc[0:4, 33] = ['PIR_NET_I', '7008', 'PIR(30923F3)_NET_I', 'PIR_Net_I']
+            df_header.iloc[43, 33] = 'PIR_NET_I'
             
-            df.iloc[0:4, 34] = ['Flag_PIR_NET_I', '-', '-', '-']
-            df.iloc[43, 34] = 'Flag_PIR_NET_I'
+            df_header.iloc[0:4, 34] = ['Flag_PIR_NET_I', '-', '-', '-']
+            df_header.iloc[43, 34] = 'Flag_PIR_NET_I'
             
-            df.iloc[0:4, 35] = ['PIR_DW_I', '7009', 'PIR(30923F3)_DW_I', 'PIR_DW_I']
-            df.iloc[43, 35] = 'PIR_DW_I'
+            df_header.iloc[0:4, 35] = ['PIR_DW_I', '7009', 'PIR(30923F3)_DW_I', 'PIR_DW_I']
+            df_header.iloc[43, 35] = 'PIR_DW_I'
             
-            df.iloc[0:4, 36] = ['Flag_PIR_DW_I', '-', '-', '-']
-            df.iloc[43, 36] = 'Flag_PIR_DW_I'
+            df_header.iloc[0:4, 36] = ['Flag_PIR_DW_I', '-', '-', '-']
+            df_header.iloc[43, 36] = 'Flag_PIR_DW_I'
 
         else:
             sys.exit('line 122, SRML_AutomatedQC')
 
-    # Get df header row info
-    # You will put this back on top of the df before export
-    df_header = df.iloc[:44]
-
-    # Get df data
-    df = df[44:]
+    # Check for column mismatch and pad header if needed BEFORE assigning columns
+    if df.shape[1] > df_header.shape[1]:
+        print(f"Adjusting header width: {df_header.shape[1]} -> {df.shape[1]}")
+        # Add missing columns to header (filled with empty strings)
+        for i in range(df_header.shape[1], df.shape[1]):
+            df_header[i] = ''
 
     # Assign df column headers (useful in using column names)
-    # These values will be searched for useful information 
-    df.columns = df_header.iloc[0,:] + '_' + df_header.iloc[2,:] + '_' + df_header.iloc[8,:]
-
-    # Make sure that the CF file is the correct length. Must be divisible by 1440
-    # The df is only the data, the header rows have been removed.
-    if (len(df))/1440 % 1 !=0:
-        print('The comprehensive format file is not the correct length')
-        print('JOSH You should probably delete the CF here and start over. Something went wrong.')
-        time.sleep(5)
-        sys.exit('line 132')
+    # These values will be searched for useful information
+    # Build column names safely by padding all Series to the same length
+    col_0 = df_header.iloc[0,:].astype(str).fillna('')
+    col_2 = df_header.iloc[2,:].astype(str).fillna('')
+    col_8 = df_header.iloc[8,:].astype(str).fillna('')
+    
+    # Ensure all series have the same length
+    max_len = df.shape[1]
+    col_0 = col_0.reindex(range(max_len), fill_value='')
+    col_2 = col_2.reindex(range(max_len), fill_value='')
+    col_8 = col_8.reindex(range(max_len), fill_value='')
+    
+    df.columns = col_0 + '_' + col_2 + '_' + col_8
 
     # Get the SZA of the data           
     sza = np.array(df.iloc[:,3], dtype = float)
