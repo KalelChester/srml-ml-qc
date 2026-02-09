@@ -1,3 +1,45 @@
+"""
+get_solar_data.py
+=================
+
+Solar irradiance data loading and comprehensive format QC processing.
+
+This module provides utilities for loading solar data files in comprehensive format
+and performing automated quality control tests (reasonableness, comparison).
+
+Key Functions
+-------------
+- subroutine_main_automated_qc() : Load comprehensive format, apply QC, save results
+
+Data Format
+-----------
+Comprehensive format CSV files contain:
+  - Rows 0-42: Metadata headers (station info, sensor details, etc.)
+  - Row 43: Column names (standardized across files)
+  - Row 44+: Hourly measurement data
+
+Special Handling
+---------------
+- Column count inconsistency in metadata: handled with on_bad_lines='skip'
+- Mixed PIR column order in EUO 2024 data: auto-corrected
+- Timestamp format: YYYY-MM-DD--HH:MM:SS (local time, no conversion)
+- No timezone localization applied (timestamps already correct)
+
+Timezone Handling
+-----------------
+IMPORTANT: Timestamps in CSV files are already in correct local time.
+No tz_localize() or timezone conversion is performed in this module.
+Timestamps are processed as-is for use with pvlib solar calculations.
+
+Column Naming Conventions
+------------------------
+- GHI, DNI, DHI: Global/Direct/Diffuse Horizontal Irradiance (W/m²)
+- Flag_*: QC flags (GOOD/BAD/PROBABLE) for each measurement
+- Temperature: Ambient temperature (°C)
+- PIR_*: Pyrradiometer measurements
+- *_prob: Probability scores from ML model
+"""
+
 import pandas as pd
 import numpy as np
 import sys
@@ -6,6 +48,35 @@ import warnings
 
 def subroutine_main_automated_qc(comprehensive_location):
     '''
+    Load comprehensive format solar data and perform automated QC.
+    
+    Processes CSV files in comprehensive format with headers, applies
+    reasonableness and comparison quality control tests, and saves results.
+    
+    Parameters
+    ----------
+    comprehensive_location : str
+        Path to comprehensive format CSV file
+    
+    Processing Steps
+    ----------------
+    1. Load CSV with flexible header parsing (handles inconsistent columns)
+    2. Extract metadata (rows 0-42) and data (rows 44+)
+    3. Fix column order issues (EUO 2024 PIR columns)
+    4. Apply QC tests (reasonableness, comparison)
+    5. Save modified CSV with QC results
+    
+    Timestamp Handling
+    ------------------
+    - Timestamps already in correct local time
+    - No timezone conversion applied
+    - Format: YYYY-MM-DD--HH:MM:SS
+    
+    Special Cases
+    -------------
+    - EUO 2024: PIR column reordering applied automatically
+    - Inconsistent metadata columns: Handled with on_bad_lines='skip'
+    
     Load the comprehensive format files
     Perform the reasonableness test
     Perform the comparison test

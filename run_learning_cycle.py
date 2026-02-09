@@ -2,11 +2,93 @@
 run_learning_cycle.py
 =====================
 
-Orchestration with confidence-gated writeback and probability columns.
-- Prediction probabilities are written back as Flag_<target>_prob with 1.0 = certain GOOD.
-- Auto-write: only commit predicted flags when model confidence is high (>= HIGH_THRESH)
-  or low (<= LOW_THRESH). Others are left untouched and recorded in a review CSV.
-- Reading is robust to presence or absence of existing Flag_<target>_prob columns.
+Training and Prediction Orchestration with Confidence-Gated Writeback
+
+This script orchestrates the complete machine learning workflow for solar irradiance
+quality control, from data loading through model training to intelligent prediction
+writeback with confidence-based filtering.
+
+Workflow Overview
+-----------------
+1. Load raw CSV files from data directory
+2. Engineer features (temporal, solar geometry, anomalies)
+3. Split data into training and prediction periods
+4. Train hybrid RNN models for each target (GHI, DNI, DHI)
+5. Generate predictions with probability scores
+6. Write back high-confidence predictions automatically
+7. Queue uncertain predictions for manual review
+
+Key Features
+------------
+- **Confidence Gating**: Only auto-writes predictions with high certainty
+  - P(GOOD) >= 0.51: Automatically flag as GOOD
+  - P(GOOD) <= 0.49: Automatically flag as BAD  
+  - 0.49 < P(GOOD) < 0.51: Send to manual review queue
+  
+- **RNN Time-Series Models**: Uses 24-hour sequences for temporal awareness
+- **Model Persistence**: Saves trained models for reuse without retraining
+- **Header Preservation**: Maintains original CSV header rows (43 metadata + 1 column names)
+- **Review Queue**: Uncertain predictions logged for human verification
+- **Probability Tracking**: Writes P(GOOD) scores alongside flags
+
+Configuration
+-------------
+Key parameters to adjust in this file:
+
+SITE_CONFIG:
+    - latitude: Site latitude in decimal degrees
+    - longitude: Site longitude in decimal degrees  
+    - altitude: Site altitude in meters (default: 0)
+    - timezone: Local timezone string (e.g., 'Etc/GMT+8', 'America/Los_Angeles')
+                Used ONLY for solar position calculations, does NOT convert times
+
+HIGH_THRESH / LOW_THRESH:
+    - Confidence thresholds for auto-write decisions
+    - Default: 0.51 / 0.49 (very conservative, most go to review)
+    - Increase gap for more auto-writes: e.g., 0.7 / 0.3
+
+TRAIN/PRED Dates:
+    - Define training period and prediction period
+    - Recommendation: 3-4 months training, 1-2 months prediction
+
+Usage
+-----
+1. Set SITE_CONFIG with your location details
+2. Adjust date ranges for training/prediction periods
+3. Verify DATA_FOLDER contains CSV files with proper structure
+4. Run: python run_learning_cycle.py
+5. Check models/ folder for saved models
+6. Check review_requests.csv for uncertain predictions
+
+Output Files
+------------
+- models/model_Flag_GHI.pkl: Trained GHI quality model
+- models/model_Flag_DNI.pkl: Trained DNI quality model
+- models/model_Flag_DHI.pkl: Trained DHI quality model
+- review_requests.csv: Predictions needing manual review
+- Updated source CSVs: With Flag_* and Flag_*_prob columns
+
+File Structure Expected
+-----------------------
+Input CSV format (after HEADER_ROWS_SKIP):
+    Column names row with: YYYY-MM-DD--HH:MM:SS, GHI, DNI, DHI, Flag_*, etc.
+    Data rows follow immediately
+
+First 44 rows:
+    Rows 0-42: Metadata headers
+    Row 43: Column names
+    Row 44+: Data
+
+Notes
+-----
+- Timestamps assumed to be in correct local time (no conversion applied)
+- Missing columns handled gracefully with safe defaults
+- Models train on RNN architecture by default (v2.0)
+- Backward compatible with v1.0 Dense models
+
+Version: 2.0 (RNN-enabled)
+Author: Solar QC Team
+Last Updated: February 2026
 """
 
 import os
@@ -41,6 +123,47 @@ REVIEW_OUT = 'review_requests.csv'  # appended with rows needing manual review
 
 # ---------------- I/O helpers ----------------
 def load_csvs(file_paths):
+    """
+    Load and concatenate multiple QC CSV files into a single DataFrame.
+    
+    This function handles the specialized CSV format with 44 header rows,
+    performs basic cleaning, and tracks source file provenance.
+    
+    Parameters
+    ----------
+    file_paths : list of str
+        Absolute paths to CSV files to load.
+    
+    Returns
+    -------
+    pd.DataFrame
+        Concatenated DataFrame with columns:
+        - All original data columns (GHI, DNI, DHI, flags, etc.)
+        - _source_file : str - Path to origin CSV for writeback
+        - _raw_ts : str - Original timestamp string for exact matching
+        Empty DataFrame if all files fail to load.
+    
+    Processing Steps
+    ----------------
+    1. Skip first 43 metadata rows
+    2. Strip whitespace from column names
+    3. Drop empty 'Data_Begins_Next_Row' column if present
+    4. Store source file path for writeback
+    5. Extract raw timestamp strings for exact matching
+    6. Concatenate all valid files
+    
+    Error Handling
+    --------------
+    - Files that fail to parse are skipped with warning message
+    - Returns empty DataFrame if no files successfully load
+    - Timestamps fall back to first column if TS_COL not found
+    
+    Notes
+    -----
+    - Timestamps preserved as strings to avoid any conversion
+    - Column names stripped to handle inconsistent whitespace
+    - Source tracking enables targeted writeback
+    """
     frames = []
     for f in file_paths:
         try:
@@ -67,15 +190,65 @@ def load_csvs(file_paths):
 
 def write_back(df_preds: pd.DataFrame, target_col: str):
     """
-    Write predicted flags back to source CSVs based on confidence gating.
-
-    For each grouped file, update only timestamps where auto-write decisions
-    were made. Predictions with intermediate confidence are saved to REVIEW_OUT
-    for manual labeling and are NOT written back to CSV.
-
-    df_preds is expected to contain columns:
-      - _source_file, _raw_ts, target_col, target_prob (Flag_<target>_prob)
-      - optional 'AutoWrite' boolean column indicating whether to commit
+    Write high-confidence predictions back to source CSVs, queue uncertain ones.
+    
+    Implements confidence-gated writeback: only predictions with extreme
+    probabilities are auto-written to CSV, while uncertain predictions are
+    saved to a review queue for manual verification.
+    
+    Parameters
+    ----------
+    df_preds : pd.DataFrame
+        Predictions DataFrame with columns:
+        - _source_file : str - Path to source CSV
+        - _raw_ts : str - Raw timestamp for exact matching
+        - {target_col} : str - Predicted flag (e.g., 'GOOD', 'BAD')
+        - {target_col}_prob : float - P(GOOD), range [0, 1]
+        - AutoWrite : bool - Whether confidence exceeds threshold
+    
+    target_col : str
+        Name of target column (e.g., 'Flag_GHI', 'Flag_DNI')
+    
+    Confidence Gating Logic
+    -----------------------
+    For each prediction:
+    - P(GOOD) >= HIGH_THRESH (0.51): Write 'GOOD' to CSV
+    - P(GOOD) <= LOW_THRESH (0.49): Write 'BAD' to CSV
+    - Between thresholds: Skip CSV write, add to review queue
+    
+    File Operations
+    ---------------
+    1. Group predictions by source file
+    2. Load original CSV (preserving all 44 header rows)
+    3. Match timestamps exactly via _raw_ts
+    4. Update only AutoWrite=True rows:
+       - Set {target_col} to predicted flag
+       - Set {target_col}_prob to probability score
+    5. Write modified CSV back (header intact)
+    6. Append uncertain predictions to REVIEW_OUT
+    
+    Review Queue Format
+    -------------------
+    review_requests.csv contains:
+    - source_file: Origin path
+    - timestamp: Raw timestamp string
+    - target: Column name (Flag_GHI/DNI/DHI)
+    - predicted_flag: Model's prediction
+    - probability: P(GOOD) score
+    
+    Error Handling
+    --------------
+    - Files that fail to open are skipped with warning
+    - Missing columns handled gracefully
+    - Probability column created if absent
+    - Timestamp mismatches logged (should be rare)
+    
+    Notes
+    -----
+    - Preserves CSV header metadata (43 rows)
+    - Uses exact string matching for timestamps (no parsing)
+    - Appends to review queue (doesn't overwrite)
+    - Only touches rows with confident predictions
     """
     review_rows = []
 
@@ -178,7 +351,8 @@ def run_cycle(train_start: str, train_end: str, pred_start: str, pred_end: str, 
 
     for t in targets:
         print(f"=== Training and predicting {t} ===")
-        model = SolarHybridModel()
+        # Use RNN model by default for better time-series sensitivity
+        model = SolarHybridModel(use_rnn=True)
         # fit model
         model.fit(train_df, target_col=t)
 
@@ -217,8 +391,8 @@ if __name__ == '__main__':
     TARGETS = ['Flag_GHI', 'Flag_DNI', 'Flag_DHI']
 
     TRAIN_START = '2025-01-01 00:00:00'
-    TRAIN_END = '2025-04-30 23:59:59'
-    PRED_START = '2025-05-01 00:00:00'
-    PRED_END = '2025-06-30 23:59:59'
+    TRAIN_END = '2025-06-30 23:59:59'
+    PRED_START = '2025-07-01 00:00:00'
+    PRED_END = '2025-07-30 23:59:59'
 
     run_cycle(TRAIN_START, TRAIN_END, PRED_START, PRED_END, TARGETS)

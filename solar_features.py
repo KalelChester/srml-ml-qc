@@ -2,20 +2,88 @@
 solar_features.py
 =================
 
-Feature engineering and deterministic-quality-control utilities for
-solar irradiance time-series data.
+Feature Engineering for Solar Irradiance Quality Control
 
-This file is intended to convert raw CSV rows into a stable set of numerical features used by
-the supervised / unsupervised models.
+This module converts raw solar measurement data into a comprehensive set of
+engineered features suitable for machine learning models. It handles timestamp
+parsing, solar geometry calculations, clear-sky modeling, and anomaly detection
+features.
 
-Design goals and constraints:
-- Backwards compatible with different CSV schemas (it tolerates missing cols)
-- Clear-sky features are optional (pvlib used when available)
-- Deterministic QC (BSRN-like checks) are produced as FEATURES only,
-  not used as final labels automatically.
-- Synthetic anomaly injection is available as an explicit training-time
-  augmentation step (off by default).
-- All outputs are numeric, NaN-free, and safe to feed into ML pipelines.
+CRITICAL: Timezone Handling Philosophy
+---------------------------------------
+**Timestamps are assumed to be ALREADY CORRECT in local time.**
+
+The timezone parameter in site configuration is used ONLY to inform pvlib what
+timezone the data represents, so it can correctly calculate:
+- Solar position (zenith, azimuth, elevation angles)
+- Clear-sky irradiance estimates
+- Local solar noon timing
+
+The timezone does NOT adjust or convert your timestamp values. Think of it as
+metadata: "These times are in Pacific time" or "These times are in UTC+8" so
+that pvlib can accurately compute where the sun is in the sky.
+
+Example:
+    Your data has timestamp "2025-06-15 12:00:00" which represents local noon
+    at your site. When you specify timezone='Etc/GMT+8', you're telling pvlib:
+    "This 12:00:00 is in GMT+8 timezone, please calculate sun position for that
+    local time." The timestamp value itself (12:00:00) does NOT change.
+
+Main Components
+---------------
+1. **Timestamp Processing**
+   - Parse various timestamp formats
+   - Extract time-of-day and seasonal features
+   - Create cyclical encodings (hour_sin/cos, doy_sin/cos)
+
+2. **Solar Geometry** (via pvlib)
+   - Calculate solar position (zenith, azimuth, elevation)
+   - Estimate clear-sky irradiance (Ineichen model)
+   - Compute clear-sky index (CSI)
+
+3. **Anomaly Features**
+   - Sliding-window correlation features
+   - Highlight temporal anomalies while robust to smooth trends
+
+4. **Deterministic QC**
+   - BSRN-inspired physical bounds checks
+   - Three-component closure test
+   - Diffuse fraction validation
+
+5. **Data Augmentation** (Training Only)
+   - Synthetic anomaly injection
+   - Conservative perturbations for rare failure modes
+
+Design Principles
+-----------------
+- Backward compatible: Handles missing columns gracefully
+- Defensive: Provides safe defaults when pvlib unavailable
+- Clean output: No NaN or inf values in returned features
+- Side-effect free: Returns new DataFrame, doesn't modify input
+- Optional features: Clear-sky calculations only when site_cfg provided
+
+Dependencies
+------------
+- pandas, numpy: Data manipulation
+- pvlib (optional): Solar position and clear-sky modeling
+  If not installed, functions gracefully with defaults
+
+Usage
+-----
+    from solar_features import add_features
+    
+    site_cfg = {
+        'latitude': 47.654,      # Decimal degrees
+        'longitude': -122.309,   # Decimal degrees
+        'altitude': 70,          # Meters above sea level
+        'timezone': 'Etc/GMT+8'  # Timezone for solar calculations (not conversion!)
+    }
+    
+    df_raw = pd.read_csv('solar_data.csv')
+    df_featured = add_features(df_raw, site_cfg)
+
+Author: Solar QC Team
+Last Updated: February 2026
 """
 
 from __future__ import annotations
@@ -175,13 +243,54 @@ def add_clearsky_features(df: pd.DataFrame,
                           tz: str = 'UTC') -> pd.DataFrame:
     """
     Add clearsky estimates (GHI_Clear, DNI_Clear, DHI_Clear) and solar geometry
-    (zenith, elevation) using pvlib. This function is defensive:
-      - If pvlib is absent, fills safe defaults (zeros / 90 degrees)
-      - Sanitizes timestamps to avoid pandas/pvlib dtype issues
-      - Reindexes results back into original dataframe shape
+    (zenith, elevation) using pvlib.
+    
+    IMPORTANT: Timezone Handling
+    -----------------------------
+    The 'tz' parameter is used ONLY for:
+    - pvlib's solar position calculations (requires timezone-aware timestamps)
+    - Clear-sky model calculations (which depend on local solar time)
+    
+    The timestamps in the input data are assumed to already be in the CORRECT
+    local time for the site. This function does NOT adjust or convert the actual
+    time values - it only adds timezone awareness so pvlib can calculate solar
+    geometry correctly.
+    
+    Think of it as: "These times are already correct, just tell pvlib what
+    timezone they represent so it can calculate sun position accurately."
+    
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame with 'Timestamp_dt' column (naive datetime, in local time)
+    latitude : float
+        Site latitude in decimal degrees
+    longitude : float
+        Site longitude in decimal degrees
+    altitude : float, default=0.0
+        Site altitude in meters above sea level
+    tz : str, default='UTC'
+        Timezone string (e.g., 'Etc/GMT+8', 'America/Los_Angeles')
+        Used only to inform pvlib of the timezone for solar calculations
+        Does NOT change the actual time values
+    
+    Returns
+    -------
+    pd.DataFrame
+        Original dataframe with added columns:
+        - GHI_Clear, DNI_Clear, DHI_Clear: Clear-sky irradiance estimates
+        - elevation: Solar elevation angle
+        - CSI: Clear-sky index (GHI / GHI_Clear)
+    
+    Notes
+    -----
+    - If pvlib is not available, fills safe defaults (zeros)
+    - Handles both timezone-naive and timezone-aware input gracefully
+    - If timestamps are already timezone-aware, preserves them as-is
+    - If timestamps are naive, assumes they represent local time and adds tz info
     """
 
-    # Provide safe defaults if pvlib is not available.
+    # Provide safe defaults if pvlib is not available
     if not _HAS_PVLIB:
         for c in ['GHI_Clear', 'DNI_Clear', 'DHI_Clear', 'CSI', 'elevation']:
             df[c] = 0.0
@@ -192,16 +301,23 @@ def add_clearsky_features(df: pd.DataFrame,
     valid_mask = times.notna()
     times_valid = times[valid_mask]
 
-    # Ensure timezone-aware index for pvlib: localize or convert
+    # Handle timezone awareness for pvlib
+    # CRITICAL: We assume times are ALREADY in the correct local time!
+    # We only add timezone info so pvlib knows what timezone to use for solar position
     try:
-        # times_valid is a Series; use .dt accessors
         if times_valid.dt.tz is None:
-            times_valid = times_valid.dt.tz_localize(tz)
+            # Times are naive - assume they represent local time in timezone 'tz'
+            # This does NOT change the time values, just adds timezone metadata
+            times_valid = times_valid.dt.tz_localize(tz, ambiguous='NaT', nonexistent='NaT')
         else:
-            times_valid = times_valid.dt.tz_convert(tz)
+            # Times already have timezone info - preserve them exactly as-is
+            # Only convert if they're in a different timezone than expected
+            if str(times_valid.dt.tz) != tz:
+                # If somehow in wrong timezone, convert (but this shouldn't happen)
+                times_valid = times_valid.dt.tz_convert(tz)
     except Exception:
-        # Fallback: naive -> interpret as tz
-        times_valid = pd.DatetimeIndex(times_valid).tz_localize(tz)
+        # Fallback: interpret naive times as being in timezone 'tz'
+        times_valid = pd.DatetimeIndex(times_valid).tz_localize(tz, ambiguous='NaT', nonexistent='NaT')
 
     times_valid = pd.DatetimeIndex(times_valid)
 
@@ -296,19 +412,91 @@ def add_features(df: pd.DataFrame, site_cfg: Optional[Dict] = None) -> pd.DataFr
     """
     Convert raw CSV-like dataframe into a feature-rich numeric dataframe.
 
-    Responsibilities:
-      - Ensure a Timestamp_dt column exists (coerce parse failures)
-      - Generate cyclical time features (hour sine/cos, day-of-year sine/cos)
-      - Optionally add clearsky and solar geometry features via pvlib
-      - Add correlation features for GHI/DNI/DHI
-      - Add deterministic QC indicator (QC_PhysicalFail)
-      - Guarantee no NaNs/inf in final output
+    This is the main entry point for feature engineering. It takes raw solar data
+    (with timestamps and irradiance measurements) and produces a comprehensive set
+    of features suitable for machine learning models.
 
-    Notes:
-      - This function is intentionally idempotent and side-effect-free with
-        respect to original measurement columns (it returns a new DataFrame).
-      - If your CSVs have differently-named timestamp columns, adapt the
-        TS_COL constant in run_learning_cycle (default 'YYYY-MM-DD--HH:MM:SS').
+    Timestamp Handling (IMPORTANT)
+    -------------------------------
+    Timestamps in the input data are assumed to be ALREADY in the correct local
+    time for the measurement site. This function:
+    - Parses timestamps to datetime objects
+    - Does NOT adjust or convert the actual time values
+    - Only adds timezone metadata when needed for pvlib calculations
+    
+    The timezone specified in site_cfg['timezone'] tells pvlib what timezone the
+    data represents (so it can calculate sun position correctly), but does NOT
+    change the timestamp values themselves.
+
+    Processing Steps
+    ----------------
+    1. Parse timestamps (assumes local time, no conversion)
+    2. Extract time-based features (hour, day-of-year, cyclical encodings)
+    3. Calculate clear-sky irradiance and solar position (via pvlib)
+    4. Compute correlation features for anomaly detection
+    5. Run deterministic QC checks (BSRN-like rules)
+    6. Clean up NaN/inf values
+    
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Raw dataframe with at minimum:
+        - A timestamp column (YYYY-MM-DD--HH:MM:SS, Timestamp, or first column)
+        - Irradiance columns: GHI, DNI, DHI (optional but recommended)
+        - Temperature column (optional)
+    
+    site_cfg : dict, optional
+        Site configuration dictionary with keys:
+        - latitude : float (decimal degrees, required for clear-sky)
+        - longitude : float (decimal degrees, required for clear-sky)
+        - altitude : float (meters above sea level, default 0.0)
+        - timezone : str (e.g., 'Etc/GMT+8', 'America/Los_Angeles')
+                     Used ONLY for pvlib solar position calculations
+                     Does NOT adjust timestamp values
+        
+        If None, skips clear-sky calculations
+    
+    Returns
+    -------
+    pd.DataFrame
+        Enhanced dataframe with original columns plus:
+        
+        Time Features:
+        - Timestamp_dt : datetime (parsed from input)
+        - Timestamp_Num : float (Unix epoch seconds)
+        - hour_sin, hour_cos : float (cyclical hour encoding)
+        - doy_sin, doy_cos : float (cyclical day-of-year encoding)
+        - hour_frac : float (hour with fractional minutes)
+        
+        Solar Features (if site_cfg provided):
+        - GHI_Clear, DNI_Clear, DHI_Clear : float (clear-sky estimates)
+        - elevation : float (solar elevation angle, degrees)
+        - CSI : float (clear-sky index, GHI/GHI_Clear, clipped to [0,3])
+        
+        Anomaly Features:
+        - CorrFeat_GHI, CorrFeat_DNI, CorrFeat_DHI : float (correlation-based)
+        - QC_PhysicalFail : int (0=pass, 1=fail deterministic checks)
+    
+    Notes
+    -----
+    - Idempotent: safe to call multiple times (creates new DataFrame)
+    - No side effects on input dataframe
+    - All NaN and inf values are replaced with 0.0 in output
+    - Missing columns filled with safe defaults
+    - Timestamp parsing errors become NaT (Not-a-Time), handled gracefully
+    
+    Example
+    -------
+        >>> site_config = {
+        ...     'latitude': 47.654,
+        ...     'longitude': -122.309,
+        ...     'altitude': 70,
+        ...     'timezone': 'Etc/GMT+8'  # Tells pvlib the timezone, doesn't adjust times
+        ... }
+        >>> df_raw = pd.read_csv('solar_data.csv', skiprows=43)
+        >>> df_featured = add_features(df_raw, site_config)
+        >>> print(df_featured.columns)
+        # Includes: Timestamp_dt, hour_sin, hour_cos, GHI_Clear, CSI, ...
     """
     temp = df.copy()
 
