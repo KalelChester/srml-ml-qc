@@ -9,34 +9,118 @@
 
 """
 SRML Manual Quality Control (QC) Tool
-=====================================
+======================================
 
 Purpose
 -------
-This script provides a graphical interface and supporting logic for
-manual quality control (QC) of SRML data products. It was originally
-developed for a single-machine environment and has been cleaned here
-to ensure portability, reproducibility, and safe initialization across
-Windows systems and Conda environments.
+Interactive GUI for manual review and correction of automated solar irradiance
+quality control predictions. Provides visualization and point-by-point editing
+of QC flags with support for multiple view modes and intelligent navigation.
 
-What Was NOT Changed
+Key Features
+------------
+- **Interactive Visualization**: 
+  - Time-series plots with 24-hour windows
+  - Multiple x-axis modes (Time/AZM/ZEN)
+  - Color-coded flag states (red=BAD, green=GOOD, yellow=PROBABLE)
+  
+- **Point Selection & Editing**:
+  - Click-drag box selection with visual feedback
+  - Bulk flag editing (Mark GOOD/BAD)
+  - Undo functionality for corrections
+  
+- **Navigation**:
+  - Day-level stepping (forward/back)
+  - Month-level jumping
+  - Direct date selection
+  
+- **Data Persistence**:
+  - Auto-saves on navigation and edits
+  - Preserves CSV header metadata (43 rows)
+  - Maintains all original columns
+
+GUI Layout
+----------
+Main Window:
+  - Top Row: File selection, navigation controls, flag editing buttons
+  - Middle: Time-series plot (GHI/DNI/DHI) with flag overlay
+  - Bottom: Status messages and current date display
+
+Controls:
+  - Previous/Next Day: Step through data chronologically
+  - Previous/Next Month: Jump month boundaries
+  - Select Box: Click-drag to select points
+  - Mark GOOD/BAD: Apply flag to selected points
+  - Undo Last: Revert most recent edit
+  - X-Axis Dropdown: Switch Time/AZM/ZEN views
+
+Recent Fixes (v1.1)
+-------------------
+1. **Mouse Event TypeError** (Fixed):
+   - Issue: Crash when mouse released outside plot area
+   - Solution: Added None checks for event.xdata/ydata
+   - Location: on_mouse_event_release() method
+
+2. **X-Axis Switching** (Fixed):
+   - Issue: Plot not updating when switching from Time to AZM/ZEN
+   - Solution: Proper axis limit setting in update_x_axis()
+   - Location: update_x_axis() method
+
+Usage Workflow
+--------------
+1. Launch: python SRML_ManualQC.py
+2. Select CSV file via dropdown (auto-populates from data folders)
+3. Navigate to date needing review
+4. Switch x-axis mode if needed (Time/AZM/ZEN)
+5. Click-drag to select suspicious points
+6. Click "Mark as GOOD" or "Mark as BAD"
+7. Changes auto-save when navigating to new day
+8. Use Undo if needed
+9. Repeat for all dates requiring review
+
+File Format
+-----------
+Input/Output CSV Structure:
+  - Rows 0-42: Metadata headers (preserved on save)
+  - Row 43: Column names (timestamp, GHI, DNI, DHI, flags, etc.)
+  - Row 44+: Data rows
+  
+Required Columns:
+  - Timestamp column (YYYY-MM-DD--HH:MM:SS format)
+  - GHI, DNI, DHI (irradiance values)
+  - Flag_GHI, Flag_DNI, Flag_DHI (QC flags to edit)
+  - Optional: Flag_*_prob (probability scores)
+
+Flag Values
+-----------
+- 'GOOD': Measurement passes QC
+- 'BAD': Measurement fails QC
+- 'PROBABLE': Uncertain, needs review
+- '' (empty): Not yet evaluated
+
+Implementation Notes
 --------------------
-- Scientific logic
-- QC algorithms
-- GUI behavior
-- Function signatures
-- Output formats
+- Built with matplotlib for plotting
+- Uses pandas for data management
+- Thread-safe logging to qc_log_files/
+- No timezone conversion (timestamps assumed correct)
+- Preserves all original columns on save
 
-What WAS Improved
------------------
-- Removal of hard-coded absolute paths
-- Script-relative path resolution
-- Robust logging initialization
-- Defensive directory creation
-- Clear section organization
-- Comprehensive inline documentation
-- Removal of dead code
-- Algorithm optimization for speed
+Version: 1.1
+Last Updated: February 2024
+Author: Solar QC Team
+
+Changelog
+---------
+v1.1 (Feb 2024):
+  - Fixed mouse event TypeError when releasing outside plot
+  - Fixed x-axis switching between Time/AZM/ZEN modes
+  - Added comprehensive documentation
+
+v1.0 (Original):
+  - Initial manual QC tool with GUI
+  - Basic selection and editing
+  - File navigation
 
 This file is safe to run on any Windows machine with the required
 Python dependencies installed.
@@ -77,6 +161,13 @@ from scipy.ndimage import binary_dilation
 import get_solar_data as SRML_Data
 
 # =====================================================================
+# Import solar model and features for probability prediction
+# =====================================================================
+
+from solar_model import SolarHybridModel
+from solar_features import add_features
+
+# =====================================================================
 # Global Path Configuration (PORTABLE)
 # =====================================================================
 
@@ -86,6 +177,17 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 # Log file directory (relative to script)
 LOG_DIR = os.path.join(BASE_DIR, "log_files", "qc_log_files")
 LOG_FILE = os.path.join(LOG_DIR, "SRML_QC_log.txt")
+
+# Model directory
+MODEL_DIR = os.path.join(BASE_DIR, "models")
+
+# Site configuration for feature generation
+SITE_CONFIG = {
+    'latitude': 47.654,
+    'longitude': -122.309,
+    'altitude': 70,
+    'timezone': 'Etc/GMT+8'
+}
 
 # Ensure logging directory exists BEFORE logger initialization
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -188,8 +290,12 @@ def main(test_file=None):
     # Format dataframe
     df, df_string, station_name = format_df(df)
     
+    # Load models and predict probabilities
+    models, probabilities = load_models_and_predict(df)
+    log_button_click(f'Loaded {len(models)} models successfully')
+    
     # Define plot variables
-    plot_vars = define_plot_vars(df, station_name)
+    plot_vars = define_plot_vars(df, station_name, probabilities)
     
     # Initialize GUI
     gui_vars = initialize_gui_and_variables(plot_vars, df)
@@ -209,6 +315,104 @@ def main(test_file=None):
     
     log_button_click('****************** Program End ******************')
     close_log()
+
+
+# =====================================================================
+# Model Loading and Probability Prediction
+# =====================================================================
+
+def load_models_and_predict(df):
+    """
+    Load all saved models and predict probabilities for all data points.
+    
+    Args:
+        df: Formatted dataframe with data (after header removal)
+        
+    Returns:
+        tuple: (models_dict, probabilities_dict)
+            - models_dict: {target_name: model_object}
+            - probabilities_dict: {target_name: probability_array}
+    """
+    log_button_click('Loading models and predicting probabilities...')
+    
+    models = {}
+    probabilities = {}
+    
+    targets = ['Flag_GHI', 'Flag_DNI', 'Flag_DHI']
+    
+    # Prepare dataframe for prediction - need to add features
+    try:
+        # Create a copy with proper timestamp column
+        pred_df = df.copy()
+        
+        # Ensure timestamp column exists
+        if 'YYYY-MM-DD--HH:MM:SS' not in pred_df.columns:
+            # Assume first data column is timestamp
+            pred_df['YYYY-MM-DD--HH:MM:SS'] = pred_df.iloc[:, 2]
+        
+        # Add features using solar_features module
+        log_button_click('Adding features for prediction...')
+        pred_df = add_features(pred_df, SITE_CONFIG)
+        pred_df['Timestamp_dt'] = pd.to_datetime(pred_df['Timestamp_dt'], errors='coerce')
+        pred_df.index = pred_df['Timestamp_dt']
+        
+        # Load each model and predict
+        for target in targets:
+            model_path = os.path.join(MODEL_DIR, f'model_{target}.pkl')
+            
+            if not os.path.exists(model_path):
+                log_button_click(f'Model not found: {model_path}')
+                messagebox.showwarning(
+                    "Model Not Found",
+                    f"Model file not found: {model_path}\n\n"
+                    f"Probability plotting for {target} will be disabled.\n\n"
+                    f"Please train models by running run_learning_cycle.py"
+                )
+                probabilities[target] = np.full(len(df), np.nan)
+                continue
+            
+            try:
+                log_button_click(f'Loading model: {target}')
+                model = SolarHybridModel.load_model(model_path)
+                models[target] = model
+                
+                # Add IF_Score if detector exists
+                if getattr(model, 'if_det', None) is not None:
+                    try:
+                        pred_df['IF_Score'] = model.if_det.decision_function(
+                            pred_df[model.common_features].fillna(0.0)
+                        )
+                    except Exception:
+                        pred_df['IF_Score'] = 0.0
+                
+                # Predict probabilities
+                log_button_click(f'Predicting probabilities for {target}...')
+                flags, probs = model.predict(pred_df, target, do_return_probs=True)
+                
+                probabilities[target] = probs
+                log_button_click(f'{target}: Mean P(GOOD) = {np.mean(probs):.3f}')
+                
+            except Exception as e:
+                log_button_click(f'Error loading/predicting {target}: {str(e)}')
+                messagebox.showerror(
+                    "Model Error",
+                    f"Error with model {target}:\n{str(e)}\n\n"
+                    f"Probability plotting for {target} will be disabled."
+                )
+                probabilities[target] = np.full(len(df), np.nan)
+        
+    except Exception as e:
+        log_button_click(f'Error in model loading: {str(e)}')
+        messagebox.showerror(
+            "Feature Generation Error",
+            f"Could not generate features for prediction:\n{str(e)}\n\n"
+            f"Probability plotting will be disabled."
+        )
+        for target in targets:
+            probabilities[target] = np.full(len(df), np.nan)
+    
+    return models, probabilities
+
 
 # =====================================================================
 # File Selection
@@ -313,13 +517,14 @@ def format_df(df):
     
     return df, df_string, station_name
 
-def define_plot_vars(df, station_name):
+def define_plot_vars(df, station_name, probabilities):
     """
     Define all variables needed for plotting and QC.
     
     Args:
         df: Formatted dataframe
         station_name: Name of the station
+        probabilities: Dictionary of probability arrays from models
         
     Returns:
         dict: Dictionary containing all plot variables
@@ -332,7 +537,10 @@ def define_plot_vars(df, station_name):
         'zen': np.array(df.iloc[:, 3]),
         'azm': np.array(df.iloc[:, 4]),
         'ghi': np.array(df['GHI']),
-        'at': np.array(df['Temperature'])
+        'at': np.array(df['Temperature']),
+        'prob_ghi': probabilities.get('Flag_GHI', np.full(len(df), np.nan)),
+        'prob_dni': probabilities.get('Flag_DNI', np.full(len(df), np.nan)),
+        'prob_dhi': probabilities.get('Flag_DHI', np.full(len(df), np.nan))
     }
     
     # Define linked columns for QC
@@ -385,7 +593,11 @@ def define_plot_vars(df, station_name):
         'mask_select': np.full_like(plot_vars['dt'], False, dtype=bool),
         'toggle_select': True,
         'toggle_bad_x': True,
-        'range_of_rows': np.arange(len(df)) - 44
+        'range_of_rows': np.arange(len(df)) - 44,
+        'show_ghi_ratio': True,
+        'show_prob_ghi': False,
+        'show_prob_dni': False,
+        'show_prob_dhi': False
     })
     
     # Initial columns to plot
@@ -701,65 +913,75 @@ def setup_gui_buttons(gui_vars, plot_vars, df, df_string, save_path):
 def setup_middle_buttons(gui_vars, plot_vars, df):
     """Set up middle section buttons."""
     button_configs = [
-        # Row 0
-        [("Autofind good next", lambda: gui_functions.autofind_flag_then_next(gui_vars, plot_vars, df, 12),
-          "lightgreen", 2, 0),
-         ("Autofind bad next", lambda: gui_functions.autofind_flag_then_next(gui_vars, plot_vars, df, 99),
-          "pink", 3, 0)],
+        # Row 0: Probability toggle buttons
+        [("Toggle GHI Ratio", lambda: gui_functions.toggle_bottom_plot(gui_vars, plot_vars, df, 'ghi_ratio'),
+          "#FFD700", 0, 0),
+         ("Toggle P(GHI)", lambda: gui_functions.toggle_bottom_plot(gui_vars, plot_vars, df, 'prob_ghi'),
+          "#FFA500", 1, 0),
+         ("Toggle P(DNI)", lambda: gui_functions.toggle_bottom_plot(gui_vars, plot_vars, df, 'prob_dni'),
+          "#DA70D6", 2, 0),
+         ("Toggle P(DHI)", lambda: gui_functions.toggle_bottom_plot(gui_vars, plot_vars, df, 'prob_dhi'),
+          "#4169E1", 3, 0)],
         
         # Row 1
-        [("<-- Backward", lambda: gui_functions.change_dt(gui_vars, plot_vars, df, -1, -1),
-          "#4A90E2", 0, 1),
-         ("Forward -->", lambda: gui_functions.change_dt(gui_vars, plot_vars, df, 1, 1),
-          "#4A90E2", 1, 1),
-         ("Autofind previous", lambda: gui_functions.autofind_next_issue(gui_vars, plot_vars, df, 'backward'),
-          "#8D6E63", 2, 1),
-         ("Autofind next", lambda: gui_functions.autofind_next_issue(gui_vars, plot_vars, df, 'forward'),
-          "#8D6E63", 3, 1)],
+        [("Autofind good next", lambda: gui_functions.autofind_flag_then_next(gui_vars, plot_vars, df, 12),
+          "lightgreen", 2, 1),
+         ("Autofind bad next", lambda: gui_functions.autofind_flag_then_next(gui_vars, plot_vars, df, 99),
+          "pink", 3, 1)],
         
         # Row 2
-        [("Left to Left", lambda: gui_functions.change_dt(gui_vars, plot_vars, df, -1, 0),
+        [("<-- Backward", lambda: gui_functions.change_dt(gui_vars, plot_vars, df, -1, -1),
           "#4A90E2", 0, 2),
-         ("Right to Left", lambda: gui_functions.change_dt(gui_vars, plot_vars, df, 0, -1),
+         ("Forward -->", lambda: gui_functions.change_dt(gui_vars, plot_vars, df, 1, 1),
           "#4A90E2", 1, 2),
-         ("Selected L to L", lambda: gui_functions.change_selected(gui_vars, plot_vars, df, -1, 0),
+         ("Autofind previous", lambda: gui_functions.autofind_next_issue(gui_vars, plot_vars, df, 'backward'),
           "#8D6E63", 2, 2),
-         ("Selected R to L", lambda: gui_functions.change_selected(gui_vars, plot_vars, df, 0, -1),
+         ("Autofind next", lambda: gui_functions.autofind_next_issue(gui_vars, plot_vars, df, 'forward'),
           "#8D6E63", 3, 2)],
         
         # Row 3
-        [("Left to Right", lambda: gui_functions.change_dt(gui_vars, plot_vars, df, 1, 0),
+        [("Left to Left", lambda: gui_functions.change_dt(gui_vars, plot_vars, df, -1, 0),
           "#4A90E2", 0, 3),
-         ("Right to Right", lambda: gui_functions.change_dt(gui_vars, plot_vars, df, 0, 1),
+         ("Right to Left", lambda: gui_functions.change_dt(gui_vars, plot_vars, df, 0, -1),
           "#4A90E2", 1, 3),
-         ("Selected L to R", lambda: gui_functions.change_selected(gui_vars, plot_vars, df, 1, 0),
+         ("Selected L to L", lambda: gui_functions.change_selected(gui_vars, plot_vars, df, -1, 0),
           "#8D6E63", 2, 3),
-         ("Selected R to R", lambda: gui_functions.change_selected(gui_vars, plot_vars, df, 0, 1),
+         ("Selected R to L", lambda: gui_functions.change_selected(gui_vars, plot_vars, df, 0, -1),
           "#8D6E63", 3, 3)],
         
         # Row 4
-        [("Show one day", lambda: gui_functions.show_day_week(gui_vars, plot_vars, df, 0, 1),
+        [("Left to Right", lambda: gui_functions.change_dt(gui_vars, plot_vars, df, 1, 0),
           "#4A90E2", 0, 4),
-         ("Show one week", lambda: gui_functions.show_day_week(gui_vars, plot_vars, df, -3, 7),
+         ("Right to Right", lambda: gui_functions.change_dt(gui_vars, plot_vars, df, 0, 1),
           "#4A90E2", 1, 4),
-         ("Toggle bad x", lambda: gui_functions.toggle_bad_x(gui_vars, plot_vars, df),
+         ("Selected L to R", lambda: gui_functions.change_selected(gui_vars, plot_vars, df, 1, 0),
           "#8D6E63", 2, 4),
-         ("Toggle selected", lambda: gui_functions.toggle_select(gui_vars, plot_vars, df),
+         ("Selected R to R", lambda: gui_functions.change_selected(gui_vars, plot_vars, df, 0, 1),
           "#8D6E63", 3, 4)],
         
         # Row 5
-        [("Show first day", lambda: gui_functions.show_first_day(gui_vars, plot_vars, df),
-          "pink", 0, 5),
-         ("Show all days", lambda: gui_functions.show_all_days(gui_vars, plot_vars, df),
-          "#4A90E2", 1, 5)],
+        [("Show one day", lambda: gui_functions.show_day_week(gui_vars, plot_vars, df, 0, 1),
+          "#4A90E2", 0, 5),
+         ("Show one week", lambda: gui_functions.show_day_week(gui_vars, plot_vars, df, -3, 7),
+          "#4A90E2", 1, 5),
+         ("Toggle bad x", lambda: gui_functions.toggle_bad_x(gui_vars, plot_vars, df),
+          "#8D6E63", 2, 5),
+         ("Toggle selected", lambda: gui_functions.toggle_select(gui_vars, plot_vars, df),
+          "#8D6E63", 3, 5)],
         
         # Row 6
+        [("Show first day", lambda: gui_functions.show_first_day(gui_vars, plot_vars, df),
+          "pink", 0, 6),
+         ("Show all days", lambda: gui_functions.show_all_days(gui_vars, plot_vars, df),
+          "#4A90E2", 1, 6)],
+        
+        # Row 7
         [("Zoom X axis", lambda: gui_functions.zoom_to_rectangle(gui_vars, plot_vars, df, True, False),
-          "#5A8266", 0, 6),
+          "#5A8266", 0, 7),
          ("Zoom Y axis", lambda: gui_functions.zoom_to_rectangle(gui_vars, plot_vars, df, False, True),
-          "#5A8266", 1, 6),
+          "#5A8266", 1, 7),
          ("Zoom XY axis", lambda: gui_functions.zoom_to_rectangle(gui_vars, plot_vars, df, True, True),
-          "#5A8266", 2, 6)]
+          "#5A8266", 2, 7)]
     ]
     
     for row_config in button_configs:
@@ -774,7 +996,7 @@ def setup_middle_buttons(gui_vars, plot_vars, df):
         command=lambda value: gui_functions.update_x_axis(gui_vars, plot_vars, df, value)
     )
     drpdwn_x_axis.config(width=15)
-    drpdwn_x_axis.grid(row=6, column=3, padx=5, pady=3, sticky="ew")
+    drpdwn_x_axis.grid(row=8, column=3, padx=5, pady=3, sticky="ew")
 
 def setup_bottom_buttons(gui_vars, plot_vars, df, df_string, save_path):
     """Set up bottom section buttons (filters and controls)."""
@@ -870,6 +1092,27 @@ def update_filter_limit(gui_vars, plot_vars, df, var_name, limit_type, value):
 
 class gui_functions:
     """Collection of GUI callback functions."""
+    
+    @staticmethod
+    def toggle_bottom_plot(gui_vars, plot_vars, df, plot_type):
+        """
+        Toggle display of different data on bottom plot.
+        
+        Args:
+            plot_type: One of 'ghi_ratio', 'prob_ghi', 'prob_dni', 'prob_dhi'
+        """
+        log_button_click(f'Toggling bottom plot: {plot_type}')
+        
+        if plot_type == 'ghi_ratio':
+            plot_vars['show_ghi_ratio'] = not plot_vars['show_ghi_ratio']
+        elif plot_type == 'prob_ghi':
+            plot_vars['show_prob_ghi'] = not plot_vars['show_prob_ghi']
+        elif plot_type == 'prob_dni':
+            plot_vars['show_prob_dni'] = not plot_vars['show_prob_dni']
+        elif plot_type == 'prob_dhi':
+            plot_vars['show_prob_dhi'] = not plot_vars['show_prob_dhi']
+        
+        update_plot(gui_vars, plot_vars, df)
     
     @staticmethod
     def change_dt(gui_vars, plot_vars, df, left_shift, right_shift):
@@ -1070,6 +1313,27 @@ class gui_functions:
                 gui_vars['ax'][0].add_patch(gui_vars['rect_patch'])
             
             gui_vars['fig'].canvas.draw()
+    
+    @staticmethod
+    def toggle_bottom_plot(gui_vars, plot_vars, df, plot_type):
+        """
+        Toggle display of different data on bottom plot.
+        
+        Args:
+            plot_type: One of 'ghi_ratio', 'prob_ghi', 'prob_dni', 'prob_dhi'
+        """
+        log_button_click(f'Toggling bottom plot: {plot_type}')
+        
+        if plot_type == 'ghi_ratio':
+            plot_vars['show_ghi_ratio'] = not plot_vars['show_ghi_ratio']
+        elif plot_type == 'prob_ghi':
+            plot_vars['show_prob_ghi'] = not plot_vars['show_prob_ghi']
+        elif plot_type == 'prob_dni':
+            plot_vars['show_prob_dni'] = not plot_vars['show_prob_dni']
+        elif plot_type == 'prob_dhi':
+            plot_vars['show_prob_dhi'] = not plot_vars['show_prob_dhi']
+        
+        update_plot(gui_vars, plot_vars, df)
     
     @staticmethod
     def on_mouse_event_motion(gui_vars, plot_vars, df, event):
@@ -1578,47 +1842,125 @@ def update_plot(gui_vars, plot_vars, df, y_min=None, y_max=None):
         linestyle=(0, (2, 10)), linewidth=0.75, color='gray'
     )
     
-    # Bottom plot (GHI ratio)
-    if 'GHI' in plot_vars['plot_these_columns']:
-        gui_vars['ax'][1].plot(
-            plot_vars['x_values'][plot_vars['mask_combined']],
-            plot_vars['ghi_ratio'][plot_vars['mask_combined']],
-            marker='o', markersize=marker_size, linewidth=0.25,
-            color='black', label='Ratio (GHI2 / GHI)'
-        )
+    # --- Lower plot: GHI Ratio and/or Probabilities ---
+    # Determine what to plot based on toggle states
+    plot_items = []
+    
+    # GHI Ratio (existing functionality)
+    if plot_vars.get('show_ghi_ratio', True):
+        ratio_mask = plot_vars['mask_combined'] & (plot_vars['ghi_ratio'] > 0)
+        if np.any(ratio_mask):
+            plot_items.append({
+                'x': plot_vars['x_values'][ratio_mask],
+                'y': plot_vars['ghi_ratio'][ratio_mask],
+                'label': 'GHI Ratio',
+                'color': 'black',
+                'marker': 'o',
+                'markersize': marker_size,
+                'alpha': 0.5
+            })
+    
+    # Probability plots
+    if plot_vars.get('show_prob_ghi', False):
+        prob_mask = plot_vars['mask_combined'] & ~np.isnan(plot_vars['prob_ghi'])
+        if np.any(prob_mask):
+            plot_items.append({
+                'x': plot_vars['x_values'][prob_mask],
+                'y': plot_vars['prob_ghi'][prob_mask],
+                'label': 'P(GHI Good)',
+                'color': '#FFA500',
+                'marker': 'o',
+                'markersize': marker_size * 0.8,
+                'alpha': 0.6
+            })
+    
+    if plot_vars.get('show_prob_dni', False):
+        prob_mask = plot_vars['mask_combined'] & ~np.isnan(plot_vars['prob_dni'])
+        if np.any(prob_mask):
+            plot_items.append({
+                'x': plot_vars['x_values'][prob_mask],
+                'y': plot_vars['prob_dni'][prob_mask],
+                'label': 'P(DNI Good)',
+                'color': '#DA70D6',
+                'marker': 's',
+                'markersize': marker_size * 0.8,
+                'alpha': 0.6
+            })
+    
+    if plot_vars.get('show_prob_dhi', False):
+        prob_mask = plot_vars['mask_combined'] & ~np.isnan(plot_vars['prob_dhi'])
+        if np.any(prob_mask):
+            plot_items.append({
+                'x': plot_vars['x_values'][prob_mask],
+                'y': plot_vars['prob_dhi'][prob_mask],
+                'label': 'P(DHI Good)',
+                'color': '#4169E1',
+                'marker': '^',
+                'markersize': marker_size * 0.8,
+                'alpha': 0.6
+            })
+    
+    # Plot all enabled items
+    if plot_items:
+        for item in plot_items:
+            gui_vars['ax'][1].plot(
+                item['x'], item['y'],
+                marker=item['marker'], linestyle='-',
+                color=item['color'], markersize=item['markersize'],
+                alpha=item['alpha'], label=item['label'], linewidth=0.5
+            )
         
-        # Highlight bad and selected points in ratio plot
-        if plot_vars['toggle_bad_x'] and 'GHI' in plot_vars['plot_these_columns']:
-            bad_mask = plot_vars['mask_combined'] & (df['Flag_GHI'] > 72)
-            if np.any(bad_mask):
-                gui_vars['ax'][1].plot(
-                    plot_vars['x_values'][bad_mask],
-                    plot_vars['ghi_ratio'][bad_mask],
-                    marker='x', markersize=7, markeredgewidth=2,
-                    linewidth=0, color='red'
-                )
+        gui_vars['ax'][1].legend()
         
-        if plot_vars['toggle_select'] and np.any(plot_vars['mask_select']):
-            select_mask = plot_vars['mask_combined'] & plot_vars['mask_select']
-            if np.any(select_mask):
-                gui_vars['ax'][1].plot(
-                    plot_vars['x_values'][select_mask],
-                    plot_vars['ghi_ratio'][select_mask],
-                    marker='o', markersize=12, linewidth=0,
-                    markeredgecolor='black', markeredgewidth=1,
-                    markerfacecolor='none'
-                )
+        # Set y-axis label and limits based on what's shown
+        has_prob = any(item['label'].startswith('P(') for item in plot_items)
+        has_ratio = any(item['label'] == 'GHI Ratio' for item in plot_items)
         
-        # Add ratio plot elements
+        # Calculate dynamic y-axis limits based on actual data
+        all_y_values = np.concatenate([item['y'] for item in plot_items])
+        all_y_values = all_y_values[~np.isnan(all_y_values)]  # Remove NaNs
+        
+        if len(all_y_values) > 0:
+            y_min = np.min(all_y_values)
+            y_max = np.max(all_y_values)
+            y_range = y_max - y_min
+            y_padding = max(0.1, y_range * 0.05)  # 5% padding, minimum 0.1
+        else:
+            y_min, y_max, y_padding = 0, 1, 0.1
+        
+        if has_prob and has_ratio:
+            gui_vars['ax'][1].set_ylabel('Ratio / Probability', fontsize=10)
+            # Dynamic limits with reasonable bounds
+            gui_vars['ax'][1].set_ylim(min(-0.1, y_min - y_padding), max(2.0, y_max + y_padding))
+            # Add reference lines for both ratio and probability
+            gui_vars['ax'][1].axhline(y=0.5, color='green', linestyle='--', linewidth=0.5, alpha=0.5)
+            gui_vars['ax'][1].axhline(y=1.0, color='darkgray', linestyle='--', linewidth=0.5)
+            gui_vars['ax'][1].axhline(y=1.08, color='darkgray', linestyle='-', linewidth=0.5)
+            gui_vars['ax'][1].axhline(y=0.92, color='darkgray', linestyle='-', linewidth=0.5)
+        elif has_prob:
+            gui_vars['ax'][1].set_ylabel('P(GOOD)', fontsize=10)
+            gui_vars['ax'][1].set_ylim(-0.05, 1.05)
+            # Add reference lines for probability
+            gui_vars['ax'][1].axhline(y=0.5, color='green', linestyle='--', linewidth=0.5, label='Decision Threshold')
+        else:
+            gui_vars['ax'][1].set_ylabel('GHI Ratio', fontsize=10)
+            # Dynamic limits for ratio with reasonable minimum
+            gui_vars['ax'][1].set_ylim(min(-0.1, y_min - y_padding), max(2.0, y_max + y_padding))
+            # Add reference lines for ratio
+            gui_vars['ax'][1].axhline(y=1.0, color='darkgray', linestyle='--', linewidth=0.5)
+            gui_vars['ax'][1].axhline(y=1.08, color='darkgray', linestyle='-', linewidth=0.5)
+            gui_vars['ax'][1].axhline(y=0.92, color='darkgray', linestyle='-', linewidth=0.5)
+        
         gui_vars['ax'][1].grid(
             which='major', axis='both',
             linestyle=(0, (2, 10)), color='lightgray'
         )
-        gui_vars['ax'][1].axhline(y=1, color='darkgray', linestyle='--', linewidth=0.5)
-        gui_vars['ax'][1].axhline(y=1.08, color='darkgray', linestyle='-', linewidth=0.5)
-        gui_vars['ax'][1].axhline(y=0.92, color='darkgray', linestyle='-', linewidth=0.5)
-        gui_vars['ax'][1].legend()
-        gui_vars['ax'][1].autoscale()
+    else:
+        gui_vars['ax'][1].text(
+            0.5, 0.5, 'No data selected for lower plot\\nUse toggle buttons to enable',
+            transform=gui_vars['ax'][1].transAxes,
+            ha='center', va='center', fontsize=12
+        )
     
     # Format X-axis for time display
     if gui_vars['x_variable'].get() == 'Time':

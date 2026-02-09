@@ -136,7 +136,7 @@ def correlation_feature(df: pd.DataFrame, col: str, span: int = 5) -> np.ndarray
     if col not in df.columns:
         return np.zeros(len(df), dtype=float)
 
-    x = df[col].fillna(0.0).to_numpy(dtype=float)
+    x = df[col].astype(float, errors='ignore').fillna(0.0).to_numpy(dtype=float)
     n = len(x)
     out = np.zeros(n, dtype=float)
 
@@ -204,10 +204,10 @@ def bs_rn_qc(df: pd.DataFrame,
     n = len(df)
     flags = np.zeros(n, dtype=int)
 
-    ghi = df.get(ghi_col, pd.Series(0.0)).fillna(0.0).to_numpy(dtype=float)
-    dni = df.get(dni_col, pd.Series(0.0)).fillna(0.0).to_numpy(dtype=float)
-    dhi = df.get(dhi_col, pd.Series(0.0)).fillna(0.0).to_numpy(dtype=float)
-    zen = df.get(zenith_col, pd.Series(90.0)).fillna(90.0).to_numpy(dtype=float)
+    ghi = df.get(ghi_col, pd.Series(0.0, dtype=float)).fillna(0.0).to_numpy(dtype=float)
+    dni = df.get(dni_col, pd.Series(0.0, dtype=float)).fillna(0.0).to_numpy(dtype=float)
+    dhi = df.get(dhi_col, pd.Series(0.0, dtype=float)).fillna(0.0).to_numpy(dtype=float)
+    zen = df.get(zenith_col, pd.Series(90.0, dtype=float)).fillna(90.0).to_numpy(dtype=float)
 
     # Night sanity: if sun below horizon (zenith >= 90), expect near-zero GHI
     night_mask = zen >= 90.0
@@ -342,7 +342,8 @@ def add_clearsky_features(df: pd.DataFrame,
 
     # Clear-sky index (CSI) robustly calculated and clipped
     denom = df['GHI_Clear'].replace(0.0, np.nan)
-    df['CSI'] = (df.get('GHI', 0.0) / denom).fillna(0.0).clip(0.0, 3.0)
+    ghi_values = df.get('GHI', pd.Series(0.0, dtype=float))
+    df['CSI'] = (ghi_values.astype(float, errors='ignore') / denom).fillna(0.0).clip(0.0, 3.0)
 
     return df
 
@@ -546,6 +547,6 @@ def add_features(df: pd.DataFrame, site_cfg: Optional[Dict] = None) -> pd.DataFr
     temp['QC_PhysicalFail'] = bs_rn_qc(temp) if 'SZA' in temp.columns else 0
 
     # Final safety cleanup: no NaN/inf remain
-    temp = temp.replace([np.inf, -np.inf], 0.0).fillna(0.0)
+    temp = temp.replace([np.inf, -np.inf], 0.0).astype(float, errors='ignore').fillna(0.0)
 
     return temp
