@@ -63,3 +63,4 @@ PARAM: nn_epochs=10 | F1: 0.999456 | ModAcc: 0.871805 | Prec: 0.999430 | Rec: 0.
 PARAM: nn_epochs=20 | F1: 0.999460 | ModAcc: 0.872705 | Prec: 0.999385 | Rec: 0.999535 | FullParams: {'rf_n_estimators': 50, 'rf_max_depth': 50, 'rf_min_samples_leaf': 1, 'nn_layers': (128, 64, 32), 'nn_learning_rate': 1e-05, 'nn_batch_size': 64, 'nn_epochs': 20}
 PARAM: nn_epochs=50 | F1: 0.999466 | ModAcc: 0.873983 | Prec: 0.999340 | Rec: 0.999591 | FullParams: {'rf_n_estimators': 50, 'rf_max_depth': 50, 'rf_min_samples_leaf': 1, 'nn_layers': (128, 64, 32), 'nn_learning_rate': 1e-05, 'nn_batch_size': 64, 'nn_epochs': 50}
 
+UPDATED TO RNN MODEL, RECHECKING MANY FEATURES:
