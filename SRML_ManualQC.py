@@ -1931,7 +1931,7 @@ def update_plot(gui_vars, plot_vars, df, y_min=None, y_max=None):
         if has_prob and has_ratio:
             gui_vars['ax'][1].set_ylabel('Ratio / Probability', fontsize=10)
             # Dynamic limits with reasonable bounds
-            gui_vars['ax'][1].set_ylim(min(-0.1, y_min - y_padding), max(2.0, y_max + y_padding))
+            gui_vars['ax'][1].set_ylim(min(0.9, y_min - y_padding), max(1.1, y_max + y_padding))
             # Add reference lines for both ratio and probability
             gui_vars['ax'][1].axhline(y=0.5, color='green', linestyle='--', linewidth=0.5, alpha=0.5)
             gui_vars['ax'][1].axhline(y=1.0, color='darkgray', linestyle='--', linewidth=0.5)
@@ -1945,7 +1945,7 @@ def update_plot(gui_vars, plot_vars, df, y_min=None, y_max=None):
         else:
             gui_vars['ax'][1].set_ylabel('GHI Ratio', fontsize=10)
             # Dynamic limits for ratio with reasonable minimum
-            gui_vars['ax'][1].set_ylim(min(-0.1, y_min - y_padding), max(2.0, y_max + y_padding))
+            gui_vars['ax'][1].set_ylim(min(0.9, y_min - y_padding), max(1.1, y_max + y_padding))
             # Add reference lines for ratio
             gui_vars['ax'][1].axhline(y=1.0, color='darkgray', linestyle='--', linewidth=0.5)
             gui_vars['ax'][1].axhline(y=1.08, color='darkgray', linestyle='-', linewidth=0.5)

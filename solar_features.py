@@ -41,9 +41,9 @@ Main Components
    - Estimate clear-sky irradiance (Ineichen model)
    - Compute clear-sky index (CSI)
 
-3. **Anomaly Features**
-   - Sliding-window correlation features
-   - Highlight temporal anomalies while robust to smooth trends
+3. **GHI Measured v. Calc**
+   - Ratio of GHI to GHI_Calc
+   - Difference between measured and calculated GHI
 
 4. **Deterministic QC**
    - BSRN-inspired physical bounds checks
@@ -102,75 +102,69 @@ except Exception:
 
 
 # -----------------------------------------------------------------------------
-# Helper: sliding-window correlation-based anomaly feature
+# GHI Ratio Feature: Measured GHI vs. Calculated GHI (GHI_Calc)
 # -----------------------------------------------------------------------------
-def correlation_feature(df: pd.DataFrame, col: str, span: int = 5) -> np.ndarray:
+def ghi_ratio(df: pd.DataFrame) -> np.ndarray:
     """
-    Compute a sliding-window correlation-difference feature.
+    Compute a the ratio of measured GHI to calculated GHI
 
-    This feature attempts to highlight single-sample or short-window anomalies
-    while being robust to smooth diurnal trends.
-
-    For index i:
-       - consider window [i-span, i+span]
-       - corr_full = correlation(signal, time) across the full window
-       - corr_sur  = correlation(signal, time) across the window excluding center
-       - output = corr_full - corr_sur
-
-    If not enough samples or constant signals, returns 0 for that index.
+    This feature attempts to highlight points where the measured GHI deviates significantly from the calculated esimate
 
     Parameters
     ----------
     df : pandas.DataFrame
-        DataFrame containing the column `col`.
-    col : str
-        Column name to compute the feature on.
-    span : int
-        Half-window size (total window length = 2*span + 1).
+        DataFrame containing the columns `GHI` and `GHI_Calc`.
 
     Returns
     -------
     np.ndarray
-        Array of length len(df) with the correlation-difference values.
+        Array of length len(df) with the GHI ratio values.
     """
-    if col not in df.columns:
+    if 'GHI' not in df.columns:
         return np.zeros(len(df), dtype=float)
 
-    x = df[col].astype(float, errors='ignore').fillna(0.0).to_numpy(dtype=float)
+    if 'GHI_Calc' not in df.columns:
+        return np.zeros(len(df), dtype=float)
+
+    x = df['GHI'].astype(float, errors='ignore').fillna(1e-2).to_numpy(dtype=float)
+    y = df['GHI_Calc'].astype(float, errors='ignore').fillna(1e-2).to_numpy(dtype=float)
     n = len(x)
+    
     out = np.zeros(n, dtype=float)
+    valid = y > 1e-2  # Avoid division by zero
+    out[valid] = x[valid] / y[valid]
 
-    for i in range(n):
-        left = max(0, i - span)
-        right = min(n, i + span + 1)
-        y = x[left:right]
-        t = np.arange(left - i, right - i, dtype=float)
+    return out
 
-        if len(y) < 3:
-            out[i] = 0.0
-            continue
+# -----------------------------------------------------------------------------
+# GHI Difference Feature: Measured GHI minus Calculated GHI
+# -----------------------------------------------------------------------------
+def ghi_diff(df: pd.DataFrame) -> np.ndarray:
+    """
+    Compute the difference between measured GHI and calculated GHI
 
-        y_d = y - y.mean()
-        t_d = t - t.mean()
-        var_y = float(np.dot(y_d, y_d))
-        var_t = float(np.dot(t_d, t_d))
-        corr_full = 0.0
-        if var_y > 1e-9 and var_t > 1e-9:
-            corr_full = float(np.dot(y_d, t_d) / np.sqrt(var_y * var_t))
+    This feature attempts to highlight points where the measured GHI deviates significantly from the calculated esimate
 
-        mask = t != 0
-        corr_sur = 0.0
-        if mask.sum() >= 2:
-            y2 = y[mask]
-            t2 = t[mask]
-            y2_d = y2 - y2.mean()
-            t2_d = t2 - t2.mean()
-            var_y2 = float(np.dot(y2_d, y2_d))
-            var_t2 = float(np.dot(t2_d, t2_d))
-            if var_y2 > 1e-9 and var_t2 > 1e-9:
-                corr_sur = float(np.dot(y2_d, t2_d) / np.sqrt(var_y2 * var_t2))
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        DataFrame containing the columns `GHI` and `GHI_Calc`.
 
-        out[i] = corr_full - corr_sur
+    Returns
+    -------
+    np.ndarray
+        Array of length len(df) with the GHI difference values.
+    """
+    if 'GHI' not in df.columns:
+        return np.zeros(len(df), dtype=float)
+
+    if 'GHI_Calc' not in df.columns:
+        return np.zeros(len(df), dtype=float)
+
+    x = df['GHI'].astype(float, errors='ignore').fillna(0.0).to_numpy(dtype=float)
+    y = df['GHI_Calc'].astype(float, errors='ignore').fillna(0.0).to_numpy(dtype=float)
+    
+    out = x - y
 
     return out
 
@@ -538,10 +532,9 @@ def add_features(df: pd.DataFrame, site_cfg: Optional[Dict] = None) -> pd.DataFr
                                      altitude=site_cfg.get('altitude', 0.0),
                                      tz=site_cfg.get('timezone', 'UTC'))
 
-    # Correlation features (local)
-    for c in ['GHI', 'DNI', 'DHI']:
-        if c in temp.columns:
-            temp[f'CorrFeat_{c}'] = correlation_feature(temp, c, span=5)
+    # Correlation-based features for anomaly detection
+    temp['ghi_ratio'] = ghi_ratio(temp)
+    temp['ghi_diff'] = ghi_diff(temp)
 
     # Deterministic QC as a feature
     temp['QC_PhysicalFail'] = bs_rn_qc(temp) if 'SZA' in temp.columns else 0

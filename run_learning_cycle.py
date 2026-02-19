@@ -390,7 +390,7 @@ def run_cycle(train_start: str, train_end: str, pred_start: str, pred_end: str, 
 if __name__ == '__main__':
     TARGETS = ['Flag_GHI', 'Flag_DNI', 'Flag_DHI']
 
-    TRAIN_START = '2025-01-01 00:00:00'
+    TRAIN_START = '2025-02-01 00:00:00'
     TRAIN_END = '2025-06-30 23:59:59'
     PRED_START = '2025-07-01 00:00:00'
     PRED_END = '2025-07-30 23:59:59'
