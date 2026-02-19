@@ -650,12 +650,13 @@ class SolarHybridModel:
 
         # Feature set (must mirror solar_features.add_features)
         self.common_features = [
-            'Timestamp_Num',
+            # 'Timestamp_Num',
             'hour_sin', 'hour_cos',
             'doy_sin', 'doy_cos',
-            'SZA', 'elevation', 'CSI',
+            'SZA', 'CSI',
             'QC_PhysicalFail', 'Temperature',
-            'CorrFeat_GHI', 'CorrFeat_DNI', 'CorrFeat_DHI',
+            'ghi_ratio', 'ghi_diff',
+            # 'CorrFeat_GHI', 'CorrFeat_DNI', 'CorrFeat_DHI', 'elevation',
             'GHI', 'DNI', 'DHI',
             'GHI_Clear', 'DNI_Clear', 'DHI_Clear'
         ]
