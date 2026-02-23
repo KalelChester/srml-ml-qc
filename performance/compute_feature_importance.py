@@ -6,15 +6,15 @@ Feature Importance Analysis for Hybrid Solar QC Model
 
 This script computes feature importance for both components of the hybrid model:
 1. Random Forest: Direct feature_importances_ from trained classifier
-2. RNN: Permutation-based importance (how much accuracy drops when feature permuted)
+2. RNN: Correlation-based importance (how strongly each feature aligns with model confidence)
 
 Output
 ------
 Results written to log_files/feature_importance.log with:
 - RF feature importances (all three target models)
-- RNN permutation importance (all three target models)
+- RNN correlation-based importance (all three target models)
 - Timestamp of analysis
-- Model versions used
+- Model files used
 
 Usage
 -----
@@ -24,7 +24,7 @@ Notes
 -----
 - Loads latest trained models from models/ folder
 - Uses recent data (2025) from data/ for importance computation
-- RNN importance computed via permutation (slower but interpretable)
+- RNN importance computed via correlation against model confidence scores
 - All importance scores normalized to [0, 1] for readability
 """
 
@@ -32,28 +32,33 @@ import os
 import glob
 import numpy as np
 import pandas as pd
+from sklearn.inspection import permutation_importance
 from datetime import datetime
 import logging
+import sys
 
-from solar_features import add_features
-from solar_model import SolarHybridModel
-from sklearn.inspection import permutation_importance
+sys.path.append('../') 
+
+try:
+    from solar_features import add_features
+    from solar_model import SolarHybridModel
+    from config import SITE_CONFIG
+    from io_utils import load_qc_csvs
+except ImportError:
+    print("CRITICAL ERROR: Could not import 'solar_features ' or 'solar_model'.")
+    print("Ensure 'solar_features.py' and 'solar_model.py' exist in the parent directory '../'")
+    sys.exit(1)
+
+
 
 
 # Configuration
-DATA_FOLDER = 'data'
-MODEL_FOLDER = 'models'
-LOG_FOLDER = 'log_files'
+DATA_FOLDER = os.path.join('../', 'data')
+MODEL_FOLDER = os.path.join('../', 'models')
+LOG_FOLDER = os.path.join('../', 'log_files')
 LOG_FILE = os.path.join(LOG_FOLDER, 'feature_importance.log')
 HEADER_ROWS_SKIP = 43
 TS_COL = 'YYYY-MM-DD--HH:MM:SS'
-
-SITE_CONFIG = {
-    'latitude': 47.654,
-    'longitude': -122.309,
-    'altitude': 70,
-    'timezone': 'Etc/GMT+8'
-}
 
 TARGETS = ['Flag_GHI', 'Flag_DNI', 'Flag_DHI']
 
@@ -70,28 +75,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def load_csvs(file_paths):
-    """Load and concatenate CSV files, preserving source tracking."""
-    frames = []
-    for f in file_paths:
-        try:
-            df = pd.read_csv(f, skiprows=HEADER_ROWS_SKIP)
-            df.columns = [c.strip() for c in df.columns]
-            if 'Data_Begins_Next_Row' in df.columns:
-                df = df.drop(columns=['Data_Begins_Next_Row'])
-            df['_source_file'] = f
-            if TS_COL in df.columns:
-                df['_raw_ts'] = df[TS_COL].astype(str).str.strip()
-            else:
-                df['_raw_ts'] = df.iloc[:, 0].astype(str).str.strip()
-            frames.append(df)
-        except Exception as e:
-            print(f"Skipping {f}: {e}")
-    
-    if len(frames) == 0:
-        return pd.DataFrame()
-    
-    return pd.concat(frames, ignore_index=True)
 
 
 def compute_rf_importance(model, feature_names):
@@ -234,7 +217,7 @@ def main():
         print("No data files found")
         return
     
-    raw = load_csvs(data_files)
+    raw = load_qc_csvs(data_files, header_rows_skip=HEADER_ROWS_SKIP, ts_col=TS_COL)
     if raw.empty:
         logger.error("Failed to load any CSV data")
         print("Failed to load data")
