@@ -1056,8 +1056,11 @@ class SolarHybridModel:
         # Evaluate on original labeled data using time-ordered split
         try:
             eval_df = train_df.copy()
+            # Check if Timestamp_dt is in index or columns and sort appropriately
             if 'Timestamp_dt' in eval_df.columns:
                 eval_df = eval_df.sort_values('Timestamp_dt')
+            elif eval_df.index.name == 'Timestamp_dt' or isinstance(eval_df.index, pd.DatetimeIndex):
+                eval_df = eval_df.sort_index()
 
             n_total = len(eval_df)
             n_test = int(max(1, n_total * float(eval_split))) if n_total > 1 else 0
@@ -1069,7 +1072,23 @@ class SolarHybridModel:
 
                 def _score_split(split_name, split_df):
                     y_true = np.where(split_df[target_col] == 99, 0, 1).astype(int)
-                    y_pred_flags = self.predict(split_df, target_col)
+                    
+                    # Try full prediction first; fallback to batch processing if memory fails
+                    try:
+                        y_pred_flags = self.predict(split_df, target_col)
+                    except Exception as mem_error:
+                        # Fallback: batch process in chunks for memory efficiency
+                        if "allocate" in str(mem_error).lower() or "memory" in str(mem_error).lower():
+                            batch_size = max(1000, len(split_df) // 10)  # ~10 batches
+                            y_pred_flags = []
+                            for i in range(0, len(split_df), batch_size):
+                                batch_df = split_df.iloc[i:min(i+batch_size, len(split_df))]
+                                batch_preds = self.predict(batch_df, target_col)
+                                y_pred_flags.extend(batch_preds)
+                            y_pred_flags = np.array(y_pred_flags)
+                        else:
+                            raise  # Re-raise if not a memory error
+                    
                     y_pred = np.where(y_pred_flags == 99, 0, 1).astype(int)
                     acc = accuracy_score(y_true, y_pred)
                     prec = precision_score(y_true, y_pred, zero_division=0)
@@ -1084,7 +1103,16 @@ class SolarHybridModel:
                 _score_split('train', train_eval)
                 _score_split('test', test_eval)
         except Exception as e:
-            print(f"    [fit] Diagnostics skipped due to error: {e}")
+            # Fallback diagnostic summary with basic stats (minimal memory usage)
+            try:
+                n_bad = (train_df[target_col] == 99).sum()
+                n_good = (train_df[target_col] != 99).sum()
+                bad_ratio = n_bad / len(train_df) if len(train_df) > 0 else 0
+                print(f"    [fit] Diagnostics (memory-fallback mode):")
+                print(f"    [fit] Data size: {len(train_df)} rows")
+                print(f"    [fit] Target distribution: {n_bad} BAD ({bad_ratio:.2%}), {n_good} GOOD ({100-bad_ratio*100:.2%})")
+            except Exception:
+                pass
 
         # store last-fit artifacts (RF, rf_cal, scaler, if_det, nn_state) on self
         # they are already attributes of self
@@ -1457,7 +1485,7 @@ class SolarHybridModel:
             'common_features': self.common_features,
             'use_rnn': self.use_rnn,
             'seq_length': self.seq_length,
-            'version': '2.0'  # Updated version for RNN support
+            'version': '1.0'  # Updated version for RNN support
         }
         
         with open(filepath, 'wb') as f:

@@ -120,6 +120,13 @@ from config import SITE_CONFIG
 from io_utils import load_qc_csvs
 
 
+# ---------------- HELPER FUNCTIONS ----------------
+def print_with_timestamp(*args, **kwargs):
+    """Print with timestamp prefix."""
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    print(f"[{timestamp}]", *args, **kwargs)
+
+
 # ---------------- CONFIG ----------------
 DATA_FOLDER = 'data'
 MODEL_FOLDER = 'models'  # Folder to save trained models
@@ -127,7 +134,7 @@ HEADER_ROWS_SKIP = 43  # Number of rows to skip when reading (skips rows 0-42, u
 HEADER_ROWS_PRESERVE = 44  # Number of rows to preserve when writing back (rows 0-43 including column names)
 TS_COL = 'YYYY-MM-DD--HH:MM:SS'
 
-SEQ_WINDOW_MINUTES = 60  # Target window in minutes for RNN sequence length
+SEQ_WINDOW_MINUTES = 180 # Target window in minutes for RNN sequence length (3 hours)
 
 # Synthetic data augmentation ratio
 # Ratio of real training data to synthetic error-injected data
@@ -140,14 +147,18 @@ def infer_seq_length(df: pd.DataFrame, window_minutes: int) -> int:
     """
     Infer RNN sequence length from median sampling interval.
     """
-    if 'Timestamp_dt' not in df.columns:
+    # Try to get timestamps from index or column
+    if isinstance(df.index, pd.DatetimeIndex):
+        times = pd.Series(df.index).sort_values()
+    elif 'Timestamp_dt' in df.columns:
+        times = pd.to_datetime(df['Timestamp_dt'], errors='coerce').dropna().sort_values()
+    else:
         return 60
-
-    times = pd.to_datetime(df['Timestamp_dt'], errors='coerce').dropna().sort_values()
+    
     if len(times) < 2:
         return 60
 
-    deltas = times.diff().dt.total_seconds().div(60.0)
+    deltas = times.diff().dt.total_seconds() / 60.0
     delta_minutes = float(deltas[deltas > 0].median()) if len(deltas) > 0 else 0.0
     if not np.isfinite(delta_minutes) or delta_minutes <= 0:
         return 60
@@ -158,7 +169,7 @@ def infer_seq_length(df: pd.DataFrame, window_minutes: int) -> int:
 # ---------------- Main cycle ----------------------------------------------
 
 def run_cycle(train_start: str, train_end: str, pred_start: str, pred_end: str, targets: list[str],
-              preserve_bad_flags: bool = True, synthetic_ratio: float = None):
+              preserve_bad_flags: bool = True, synthetic_ratio: float = None, num_test_files: int = 2):
     """
     Run complete training and prediction cycle with optional data augmentation.
     
@@ -181,24 +192,44 @@ def run_cycle(train_start: str, train_end: str, pred_start: str, pred_end: str, 
         Ratio of real to synthetic data (e.g., 2.0 = 2:1 real:synthetic).
         If None, uses SYNTHETIC_DATA_RATIO from config.
         If 0 or None, no synthetic data augmentation is performed.
+    num_test_files : int, default=2
+        Number of monthly files to randomly select for testing.
+        These files are excluded from training and used for prediction/validation.
     """
     # Get all CSV files
     all_files = sorted(glob.glob(os.path.join(DATA_FOLDER, '**', '*.csv'), recursive=True))
     
-    # Load all data for training
-    print("Loading data for training...")
-    raw = load_qc_csvs(all_files, header_rows_skip=HEADER_ROWS_SKIP, ts_col=TS_COL)
+    # Randomly select test files
+    if len(all_files) > num_test_files:
+        random.seed(42)  # For reproducibility
+        test_files = random.sample(all_files, num_test_files)
+        train_files = [f for f in all_files if f not in test_files]
+        print_with_timestamp(f"\n=== File Split (Random Selection) ===")
+        print_with_timestamp(f"Total files: {len(all_files)}")
+        print_with_timestamp(f"Training files: {len(train_files)}")
+        print_with_timestamp(f"Test files: {len(test_files)}")
+        print_with_timestamp(f"Test files selected:")
+        for tf in sorted(test_files):
+            print_with_timestamp(f"  - {os.path.basename(tf)}")
+    else:
+        print_with_timestamp(f"Warning: Only {len(all_files)} files available, need at least {num_test_files + 1} for train/test split")
+        train_files = all_files
+        test_files = []
+    
+    # Load training data
+    print_with_timestamp("\nLoading data for training...")
+    raw = load_qc_csvs(train_files, header_rows_skip=HEADER_ROWS_SKIP, ts_col=TS_COL)
     if raw.empty:
-        print('No files found')
+        print_with_timestamp('No training files found')
         return
 
     # Add features
-    print("Engineering features...")
+    print_with_timestamp("Engineering features...")
     full = add_features(raw, SITE_CONFIG)
     full['Timestamp_dt'] = pd.to_datetime(full['Timestamp_dt'], errors='coerce')
-    full.index = full['Timestamp_dt']
+    full = full.set_index('Timestamp_dt', drop=True)
     
-    # Extract training data
+    # Extract training data based on date range
     train_mask = (full.index >= pd.to_datetime(train_start)) & (full.index <= pd.to_datetime(train_end))
     train_df = full[train_mask].copy()
 
@@ -210,14 +241,14 @@ def run_cycle(train_start: str, train_end: str, pred_start: str, pred_end: str, 
         synthetic_ratio = SYNTHETIC_DATA_RATIO
     
     if synthetic_ratio > 0:
-        print(f"\n=== Data Augmentation (Ratio {synthetic_ratio}:1 real:synthetic) ===")
+        print_with_timestamp(f"\n=== Data Augmentation (Ratio {synthetic_ratio}:1 real:synthetic) ===")
         
         # Calculate how much synthetic data to generate
         train_duration_days = (pd.to_datetime(train_end) - pd.to_datetime(train_start)).days
         synthetic_duration_days = int(train_duration_days / synthetic_ratio)
         
-        print(f"Training period: {train_duration_days} days")
-        print(f"Synthetic data target: {synthetic_duration_days} days")
+        print_with_timestamp(f"Training period: {train_duration_days} days")
+        print_with_timestamp(f"Synthetic data target: {synthetic_duration_days} days")
         
         # Sample continuous months from training data
         train_start_dt = pd.to_datetime(train_start)
@@ -235,7 +266,7 @@ def run_cycle(train_start: str, train_end: str, pred_start: str, pred_end: str, 
         months_needed = max(1, int(synthetic_duration_days / days_per_month))
         months_needed = min(months_needed, len(available_months))  # Can't sample more than available
         
-        print(f"Randomly sampling {months_needed} whole month(s) for error injection...")
+        print_with_timestamp(f"Randomly sampling {months_needed} whole month(s) for error injection...")
         
         # Randomly select individual months (not necessarily continuous)
         if months_needed <= len(available_months):
@@ -250,16 +281,16 @@ def run_cycle(train_start: str, train_end: str, pred_start: str, pred_end: str, 
                 month_data = train_df[month_mask].copy()
                 
                 if not month_data.empty:
-                    print(f"  Sampled: {month_start.strftime('%Y-%m')} ({len(month_data)} rows)")
+                    print_with_timestamp(f"  Sampled: {month_start.strftime('%Y-%m')} ({len(month_data)} rows)")
                     synthetic_data_list.append(month_data)
             
             if synthetic_data_list:
                 # Combine sampled months
                 sampled_df = pd.concat(synthetic_data_list, ignore_index=False)
-                print(f"Total sampled data: {len(sampled_df)} rows")
+                print_with_timestamp(f"Total sampled data: {len(sampled_df)} rows")
                 
                 # Inject errors using error injection pipeline
-                print("Injecting synthetic errors...")
+                print_with_timestamp("Injecting synthetic errors...")
                 pipeline = ErrorInjectionPipeline()
                 
                 # Process the sampled data - we need to work with the raw dataframe
@@ -271,7 +302,7 @@ def run_cycle(train_start: str, train_end: str, pred_start: str, pred_end: str, 
                 synthetic_flagged = pipeline.engine.flag_bad_data(synthetic_errored, error_metadata)
                 
                 # Re-engineer features for the synthetic data to ensure consistency
-                print("Re-engineering features for synthetic data...")
+                print_with_timestamp("Re-engineering features for synthetic data...")
                 # We need to restore the _source_file and _raw_ts columns if they were lost
                 for col in ['_source_file', '_raw_ts']:
                     if col in sampled_df.columns and col not in synthetic_flagged.columns:
@@ -280,35 +311,35 @@ def run_cycle(train_start: str, train_end: str, pred_start: str, pred_end: str, 
                 # Re-add features (some may have been affected by error injection)
                 synthetic_final = add_features(synthetic_flagged, SITE_CONFIG)
                 synthetic_final['Timestamp_dt'] = pd.to_datetime(synthetic_final['Timestamp_dt'], errors='coerce')
-                synthetic_final.index = synthetic_final['Timestamp_dt']
+                synthetic_final = synthetic_final.set_index('Timestamp_dt', drop=True)
                 
                 # Combine original training data with synthetic data
-                print(f"\nCombining training data:")
-                print(f"  Original: {len(train_df)} rows")
-                print(f"  Synthetic: {len(synthetic_final)} rows")
+                print_with_timestamp(f"\nCombining training data:")
+                print_with_timestamp(f"  Original: {len(train_df)} rows")
+                print_with_timestamp(f"  Synthetic: {len(synthetic_final)} rows")
                 train_df = pd.concat([train_df, synthetic_final], ignore_index=False)
-                print(f"  Combined: {len(train_df)} rows")
+                print_with_timestamp(f"  Combined: {len(train_df)} rows")
                 
                 # Count bad flags in combined data
                 bad_flags_count = 0
                 for t in targets:
                     if t in train_df.columns:
                         bad_flags_count += (train_df[t] == 99).sum()
-                print(f"  Total bad flags across all targets: {bad_flags_count}")
+                print_with_timestamp(f"  Total bad flags across all targets: {bad_flags_count}")
             else:
-                print("Warning: No data sampled for synthetic generation")
+                print_with_timestamp("Warning: No data sampled for synthetic generation")
         else:
-            print(f"Warning: Not enough months available for synthetic data generation")
+            print_with_timestamp(f"Warning: Not enough months available for synthetic data generation")
     else:
-        print("\nSkipping synthetic data augmentation (ratio = 0)")
+        print_with_timestamp("\nSkipping synthetic data augmentation (ratio = 0)")
 
     # Infer sequence length based on data resolution
     seq_length = infer_seq_length(train_df, SEQ_WINDOW_MINUTES)
-    print(f"\n[info] Inferred seq_length={seq_length} from data resolution")
+    print_with_timestamp(f"\n[info] Inferred seq_length={seq_length} from data resolution")
 
     # Train models for each target
     for t in targets:
-        print(f"\n=== Training {t} ===")
+        print_with_timestamp(f"\n=== Training {t} ===")
         # Use RNN model by default for better time-series sensitivity
         model = SolarHybridModel(use_rnn=True, seq_length=seq_length)
         model.fit(train_df, target_col=t)
@@ -316,34 +347,19 @@ def run_cycle(train_start: str, train_end: str, pred_start: str, pred_end: str, 
         # Save the trained model
         model_filename = os.path.join(MODEL_FOLDER, f'model_{t}.pkl')
         model.save_model(model_filename)
-        print(f"Model saved to {model_filename}")
+        print_with_timestamp(f"Model saved to {model_filename}")
     
-    # Determine prediction files based on date range
-    # Convert date range to month format for file matching
-    pred_start_date = pd.to_datetime(pred_start)
-    pred_end_date = pd.to_datetime(pred_end)
-    
-    pred_files = []
-    for f in all_files:
-        try:
-            basename = os.path.basename(f)
-            # Extract date from filename (assumes format like STW_2025-07_QC.csv)
-            if '_' in basename and '-' in basename:
-                date_part = basename.split('_')[1].split('.')[0]  # e.g., "2025-07"
-                file_date = pd.to_datetime(date_part + '-01')  # First day of month
-                
-                # Include file if it overlaps with prediction period
-                if file_date >= pred_start_date.replace(day=1) and file_date <= pred_end_date:
-                    pred_files.append(f)
-        except Exception:
-            pass
-    
-    if not pred_files:
-        print("\nWarning: No files found for prediction period")
+    # Use the randomly selected test files for prediction
+    if not test_files:
+        print_with_timestamp("\nWarning: No test files available for prediction")
         return
     
+    pred_files = test_files
+    
     # Run predictions using predict_with_saved_model
-    print(f"\n=== Running predictions on {len(pred_files)} file(s) ===")
+    print_with_timestamp(f"\n=== Running predictions on {len(pred_files)} test file(s) ===")
+    for pf in sorted(pred_files):
+        print_with_timestamp(f"  - {os.path.basename(pf)}")
     predict_with_model(
         file_paths=pred_files,
         targets=targets,
@@ -361,7 +377,7 @@ if __name__ == '__main__':
     PRED_START = '2025-07-01 00:00:00'
     PRED_END = '2025-07-31 23:59:59'
 
-    # Run with default behavior (preserves existing bad flags, uses synthetic augmentation)
+    # Run with default behavior (preserves existing bad flags, uses synthetic augmentation, 2 random test files)
     run_cycle(TRAIN_START, TRAIN_END, PRED_START, PRED_END, TARGETS)
     
     # To overwrite all flags with model predictions:
@@ -372,3 +388,6 @@ if __name__ == '__main__':
     
     # To use a different augmentation ratio (e.g., 3:1 real:synthetic):
     # run_cycle(TRAIN_START, TRAIN_END, PRED_START, PRED_END, TARGETS, synthetic_ratio=3.0)
+    
+    # To use more test files (e.g., 4 files):
+    # run_cycle(TRAIN_START, TRAIN_END, PRED_START, PRED_END, TARGETS, num_test_files=4)

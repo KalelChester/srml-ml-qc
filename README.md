@@ -9,6 +9,7 @@ review tools, and synthetic error injection for robustness testing.
 - Core training and prediction
   - run_learning_cycle.py: Orchestrates feature engineering, model training, and prediction
   - predict_with_saved_model.py: Loads saved models and writes predictions back to CSVs
+  - prediction_comparison.py: Compare predictions vs current flags without modifying files
   - solar_model.py: Hybrid QC model (RandomForest + IsolationForest + RNN/Dense)
   - solar_features.py: Feature engineering (solar geometry, clearsky, QC features)
 
@@ -78,6 +79,29 @@ python predict_with_saved_model.py --start "2025-07-01" --end "2025-08-31"
 # Overwrite all flags (use with caution)
 python predict_with_saved_model.py --start "2025-07-01" --end "2025-08-31" --overwrite-all-flags
 ```
+
+### 3) Compare Predictions Against Current Flags
+
+Use prediction_comparison.py to evaluate model accuracy without modifying data.
+This loads random files, runs predictions, and compares against existing flags.
+
+```bash
+# Compare on 5 random files (default)
+python prediction_comparison.py
+
+# Compare on specific count
+python prediction_comparison.py 10
+
+# Compare all files
+python prediction_comparison.py -1
+
+# Compare specific file(s)
+python prediction_comparison.py --file data/STW_2025/STW_2025-07_QC.csv
+python prediction_comparison.py --file data/STW_2025/STW_2025-07_QC.csv data/STW_2025/STW_2025-08_QC.csv
+```
+
+Output includes accuracy, precision, recall, and F1 score for each feature (GHI, DNI, DHI).
+Results are printed to terminal and saved to log_files/.
 
 ## Manual Review Workflow
 

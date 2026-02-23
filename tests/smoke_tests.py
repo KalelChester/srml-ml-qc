@@ -37,9 +37,6 @@ def find_sample_file(min_rows: int = 500):
             labeled = df[df[flag_col].notna()]
             if len(labeled) < 50:
                 continue
-            y_labels = np.where(labeled[flag_col] == 99, 0, 1).astype(int)
-            if len(np.unique(y_labels)) < 2:
-                continue
             return path
         except Exception:
             continue
@@ -76,9 +73,8 @@ def main():
 
     y_labels = np.where(df_labeled[target_col] == 99, 0, 1).astype(int)
     if len(np.unique(y_labels)) < 2:
-        print("Only one class present in sample labels. Smoke tests skipped.")
-        return
-
+        print("Note: Only one class in sample labels, but proceeding with smoke test.")
+    
     # Train a lightweight model (Dense, 1 epoch)
     model = SolarHybridModel(use_rnn=False)
     model.fit(

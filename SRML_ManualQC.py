@@ -1738,7 +1738,7 @@ class gui_functions:
         if len(uncertain_indices) < 1:
             # No uncertain points found
             log_button_click(f'No uncertain points found for {feature}')
-            plot_vars['plot_these_columns'] = [feature]
+            # Keep current column selection, just show all days
             gui_functions.show_all_days(gui_vars, plot_vars, df)
             plot_vars['mask_select'] = np.full_like(plot_vars['dt'], False, dtype=bool)
             update_plot(gui_vars, plot_vars, df)
@@ -1778,8 +1778,9 @@ class gui_functions:
         # Update the index for next time
         plot_vars[uncertain_idx_key] = (current_idx + 1) % len(sorted_regions)
         
-        # Set the feature column to plot
-        plot_vars['plot_these_columns'] = [feature]
+        # Ensure the feature is visible (add to plot_these_columns if not already present)
+        if feature not in plot_vars['plot_these_columns']:
+            plot_vars['plot_these_columns'].append(feature)
         
         # Show the probability plot for this feature
         plot_vars[f'show_prob_{feature.lower()}'] = True
