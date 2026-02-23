@@ -114,8 +114,10 @@ python SRML_ManualQC.py
 
 ## Synthetic Error Injection
 
-error_injection.py creates realistic synthetic errors and flags them as bad.
-This is used for robustness testing and optional training augmentation.
+error_injection.py creates realistic synthetic errors in solar radiation data for robustness testing and training augmentation.
+
+Supports six error types (reduce_features, copy_from_day, end_of_day_frost, cleaning_event, water_droplet, broken_tracker),
+SZA-based daytime filtering, weighted error selection, and automatic manifest generation.
 
 ```bash
 # Inject errors and save with manifest
@@ -123,9 +125,20 @@ python error_injection.py data/STW_2023/STW_2023-01_QC.csv --mode save
 
 # Inject errors and return dataframe (no writeback)
 python error_injection.py data/STW_2023/STW_2023-01_QC.csv --mode return
+
+# Multiple files with wildcard
+python error_injection.py "data/STW_2023/*.csv" --mode save
 ```
 
-See QUICK_REFERENCE.md for additional usage patterns and config notes.
+Python API usage:
+```python
+from error_injection import ErrorInjectionPipeline
+
+pipeline = ErrorInjectionPipeline()
+df_synthetic = pipeline.process_file('data/file.csv', output_mode='return')
+```
+
+See QUICK_REFERENCE.md for detailed configuration and usage patterns.
 
 ## Hyperparameter Selection
 

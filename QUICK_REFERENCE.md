@@ -171,64 +171,120 @@ python SRML_ManualQC.py path/to/file.csv
 
 ## error_injection.py - Realistic Error Injection
 
-**Purpose**: Create synthetic errors for testing and training augmentation
+**Purpose**: Create realistic synthetic errors in solar radiation data for robustness testing and training augmentation
 
-**Architecture**:
-- Four error types: reduce_features, zero_features, copy_from_day, add_noise
-- SZA-based daytime filtering (configurable threshold)
-- Random error duration (5-60 minutes typical)
-- Automatic manifest generation (tracks injected errors)
+**Key Features**:
+- Six configurable error types (reduce_features, copy_from_day, end_of_day_frost, cleaning_event, water_droplet, broken_tracker)
+- SZA-based daytime filtering (solar zenith angle >= 85° excluded)
+- Weighted error selection (each error type has configurable probability)
+- Automatic bad flag assignment (Flag = 99)
+- Optional manifest generation (tracks which samples were modified and how)
+- Modular architecture: DataManager, SolarGeometry, ErrorFunctions, ErrorInjectionEngine, OutputHandler
 
-**Basic usage**:
+**Error Types**:
+1. **reduce_features**: Reduce all irradiance values by 1-50%
+2. **copy_from_day**: Copy values from a different day (-30 to -1 days offset)
+3. **end_of_day_frost**: Dip 10-40% at day end (frost/dew formation)
+4. **cleaning_event**: Brief 4-8% dip lasting 3 minutes (panel cleaning)
+5. **water_droplet**: Spike 5-25% lasting 1-5 minutes (water droplet runoff)
+6. **broken_tracker**: Sustained low values for 30-240 minutes (tracker failure)
+
+**Configuration** (ERROR_INJECTION_CONFIG in error_injection.py):
+- `error_probability`: Likelihood (0.0-1.0) that a file gets errors
+- `error_count_range`: (min, max) errors to inject per file
+- `daytime_bias`: Bias toward daytime errors (0.0-1.0)
+- `sza_threshold`: Solar zenith angle threshold for daytime (85° default)
+- Each error type has: `weight` (selection probability), and type-specific parameters
+
+**Usage - Python API**:
 ```python
 from error_injection import ErrorInjectionPipeline
 
-# For testing (save to disk with manifest):
+# Default configuration (injected errors automatically flagged as 99)
 pipeline = ErrorInjectionPipeline()
+
+# Save errors to file with manifest
 pipeline.process_file('data/STW_2023/STW_2023-01_QC.csv', output_mode='save')
-# Output: data/injected_error/file_errored.csv + manifest.json
+# Output: data/injected_error/STW_2023-01_errored_QC.csv + manifest.json
 
-# For training (return dataframe):
-df_synthetic = pipeline.process_file('data/file.csv', output_mode='return')
-```
+# Return dataframe (no file writeback)
+df_synthetic = pipeline.process_file('data/STW_2023/STW_2023-01_QC.csv', output_mode='return')
 
-**Batch processing**:
-```python
-pipeline = ErrorInjectionPipeline()
+# Batch processing multiple files
 files = [f'data/STW_2023/STW_2023-{m:02d}_QC.csv' for m in range(1, 13)]
 pipeline.process_multiple_files(files, output_mode='save')
 ```
 
-**Custom parameters**:
+**Custom Configuration**:
 ```python
 from error_injection import ErrorInjectionPipeline, ERROR_INJECTION_CONFIG
 import copy
 
 config = copy.deepcopy(ERROR_INJECTION_CONFIG)
-config['error_probability'] = 0.9      # More files get errors
-config['error_count_range'] = (2, 8)   # More errors per file  
-config['daytime_bias'] = 0.95          # Mostly daytime errors
-config['sza_threshold'] = 90.0         # SZA < 90 = daytime
+config['error_probability'] = 0.9           # 90% of files get errors
+config['error_count_range'] = (5, 15)       # 5-15 errors per file
+config['daytime_bias'] = 0.95               # Mostly daytime
+config['sza_threshold'] = 80.0              # More aggressive daytime filter
+
+# Adjust individual error type weights
+config['error_functions']['reduce_features']['weight'] = 0.5  # More common
+config['error_functions']['broken_tracker']['weight'] = 0.05  # Less common
 
 pipeline = ErrorInjectionPipeline(config=config)
 pipeline.process_file('data/file.csv', output_mode='save')
 ```
 
-**Command-line**:
+**Command-line Usage**:
 ```bash
-# Single file:
+# Single file
 python error_injection.py data/STW_2023/STW_2023-01_QC.csv --mode save
 
-# Multiple files:
+# Multiple files (wildcard)
 python error_injection.py "data/STW_2023/*.csv" --mode save
+
+# Verbose output
+python error_injection.py data/STW_2023/STW_2023-01_QC.csv --mode save --verbose
+```
+
+**Command-line Options**:
+- `filepath`: Path to file or wildcard pattern (supports glob)
+- `--mode save | return`: Save to disk with manifest OR return DataFrame
+- `--verbose`: Detailed output about injected errors
+
+**Output Files** (when mode='save'):
+- **Data file**: `data/injected_error/{original_name}_errored_QC.csv`
+  - Same format as input but with synthetic errors
+  - Flag columns set to 99 for modified samples
+- **Manifest**: `data/injected_error/{original_name}_errored_manifest.json`
+  - JSON tracking: which rows modified, error type, parameters, original values
+  - Useful for validation and error analysis
+
+**Training Integration**:
+Use synthetically generated data to augment training dataset:
+```python
+import pandas as pd
+from error_injection import ErrorInjectionPipeline
+
+# Generate synthetic errors
+pipeline = ErrorInjectionPipeline()
+df_synthetic = pipeline.process_file('data/STW_2023/STW_2023-01_QC.csv', output_mode='return')
+
+# Combine with real training data
+df_real = pd.read_csv('data/STW_2023/STW_2023-02_QC.csv', skiprows=43)
+df_augmented = pd.concat([df_real, df_synthetic], ignore_index=True)
+
+# Train model on augmented data
+model.fit(df_augmented, target_col='Flag_GHI')
 ```
 
 **Reproducibility**:
+For reproducible synthetic errors, set random seeds:
 ```python
 import random, numpy as np
-random.seed(42); np.random.seed(42)
+random.seed(42)
+np.random.seed(42)
 df = pipeline.process_file('data/file.csv', output_mode='return')
-# Repeatable with same seed
+# Same seed produces identical errors
 ```
 
 ═══════════════════════════════════════════════════════════════════════════════
