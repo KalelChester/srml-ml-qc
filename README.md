@@ -25,12 +25,6 @@ review tools, and synthetic error injection for robustness testing.
   - hyperparameter_selection/solar_model_modular.py: Modular model for tuning
   - performance/compute_feature_importance.py: RF + RNN feature importance report
 
-- Examples
-  - examples/example_load_and_predict.py: Load a model and predict
-  - examples/example_preserve_flags.py: Flag preservation behavior
-  - examples/example_rnn_analysis.py: RNN behavior and analysis
-  - examples/error_injection_examples.py: Error injection usage patterns
-
 ## Data Format
 
 All primary CSVs are in the SRML comprehensive format:
