@@ -54,18 +54,6 @@ Controls:
   - Undo Last: Revert most recent edit
   - X-Axis Dropdown: Switch Time/AZM/ZEN views
 
-Recent Fixes (v1.1)
--------------------
-1. **Mouse Event TypeError** (Fixed):
-   - Issue: Crash when mouse released outside plot area
-   - Solution: Added None checks for event.xdata/ydata
-   - Location: on_mouse_event_release() method
-
-2. **X-Axis Switching** (Fixed):
-   - Issue: Plot not updating when switching from Time to AZM/ZEN
-   - Solution: Proper axis limit setting in update_x_axis()
-   - Location: update_x_axis() method
-
 Usage Workflow
 --------------
 1. Launch: python SRML_ManualQC.py
@@ -106,21 +94,7 @@ Implementation Notes
 - No timezone conversion (timestamps assumed correct)
 - Preserves all original columns on save
 
-Version: 1.1
-Last Updated: February 2024
 Author: Solar QC Team
-
-Changelog
----------
-v1.1 (Feb 2024):
-  - Fixed mouse event TypeError when releasing outside plot
-  - Fixed x-axis switching between Time/AZM/ZEN modes
-  - Added comprehensive documentation
-
-v1.0 (Original):
-  - Initial manual QC tool with GUI
-  - Basic selection and editing
-  - File navigation
 
 This file is safe to run on any Windows machine with the required
 Python dependencies installed.
@@ -166,6 +140,7 @@ import get_solar_data as SRML_Data
 
 from solar_model import SolarHybridModel
 from solar_features import add_features
+from config import SITE_CONFIG
 
 # =====================================================================
 # Global Path Configuration (PORTABLE)
@@ -180,14 +155,6 @@ LOG_FILE = os.path.join(LOG_DIR, "SRML_QC_log.txt")
 
 # Model directory
 MODEL_DIR = os.path.join(BASE_DIR, "models")
-
-# Site configuration for feature generation
-SITE_CONFIG = {
-    'latitude': 47.654,
-    'longitude': -122.309,
-    'altitude': 70,
-    'timezone': 'Etc/GMT+8'
-}
 
 # Ensure logging directory exists BEFORE logger initialization
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -590,6 +557,9 @@ def define_plot_vars(df, station_name, probabilities):
         'all_columns': df.columns[7:-1:2],
         'all_columns_flags': df.columns[8:-1:2],
         'last_checked_index': 0,
+        'uncertain_index_ghi': 0,
+        'uncertain_index_dni': 0,
+        'uncertain_index_dhi': 0,
         'mask_select': np.full_like(plot_vars['dt'], False, dtype=bool),
         'toggle_select': True,
         'toggle_bad_x': True,
@@ -929,59 +899,67 @@ def setup_middle_buttons(gui_vars, plot_vars, df):
          ("Autofind bad next", lambda: gui_functions.autofind_flag_then_next(gui_vars, plot_vars, df, 99),
           "pink", 3, 1)],
         
-        # Row 2
-        [("<-- Backward", lambda: gui_functions.change_dt(gui_vars, plot_vars, df, -1, -1),
-          "#4A90E2", 0, 2),
-         ("Forward -->", lambda: gui_functions.change_dt(gui_vars, plot_vars, df, 1, 1),
-          "#4A90E2", 1, 2),
-         ("Autofind previous", lambda: gui_functions.autofind_next_issue(gui_vars, plot_vars, df, 'backward'),
-          "#8D6E63", 2, 2),
-         ("Autofind next", lambda: gui_functions.autofind_next_issue(gui_vars, plot_vars, df, 'forward'),
-          "#8D6E63", 3, 2)],
+        # Row 2: Find most uncertain points
+        [("Find Uncertain GHI", lambda: gui_functions.autofind_uncertain_next(gui_vars, plot_vars, df, 'GHI'),
+          "#FFB347", 0, 2),
+         ("Find Uncertain DNI", lambda: gui_functions.autofind_uncertain_next(gui_vars, plot_vars, df, 'DNI'),
+          "#DDA0DD", 1, 2),
+         ("Find Uncertain DHI", lambda: gui_functions.autofind_uncertain_next(gui_vars, plot_vars, df, 'DHI'),
+          "#87CEEB", 2, 2)],
         
         # Row 3
-        [("Left to Left", lambda: gui_functions.change_dt(gui_vars, plot_vars, df, -1, 0),
+        [("<-- Backward", lambda: gui_functions.change_dt(gui_vars, plot_vars, df, -1, -1),
           "#4A90E2", 0, 3),
-         ("Right to Left", lambda: gui_functions.change_dt(gui_vars, plot_vars, df, 0, -1),
+         ("Forward -->", lambda: gui_functions.change_dt(gui_vars, plot_vars, df, 1, 1),
           "#4A90E2", 1, 3),
-         ("Selected L to L", lambda: gui_functions.change_selected(gui_vars, plot_vars, df, -1, 0),
+         ("Autofind previous", lambda: gui_functions.autofind_next_issue(gui_vars, plot_vars, df, 'backward'),
           "#8D6E63", 2, 3),
-         ("Selected R to L", lambda: gui_functions.change_selected(gui_vars, plot_vars, df, 0, -1),
+         ("Autofind next", lambda: gui_functions.autofind_next_issue(gui_vars, plot_vars, df, 'forward'),
           "#8D6E63", 3, 3)],
         
         # Row 4
-        [("Left to Right", lambda: gui_functions.change_dt(gui_vars, plot_vars, df, 1, 0),
+        [("Left to Left", lambda: gui_functions.change_dt(gui_vars, plot_vars, df, -1, 0),
           "#4A90E2", 0, 4),
-         ("Right to Right", lambda: gui_functions.change_dt(gui_vars, plot_vars, df, 0, 1),
+         ("Right to Left", lambda: gui_functions.change_dt(gui_vars, plot_vars, df, 0, -1),
           "#4A90E2", 1, 4),
-         ("Selected L to R", lambda: gui_functions.change_selected(gui_vars, plot_vars, df, 1, 0),
+         ("Selected L to L", lambda: gui_functions.change_selected(gui_vars, plot_vars, df, -1, 0),
           "#8D6E63", 2, 4),
-         ("Selected R to R", lambda: gui_functions.change_selected(gui_vars, plot_vars, df, 0, 1),
+         ("Selected R to L", lambda: gui_functions.change_selected(gui_vars, plot_vars, df, 0, -1),
           "#8D6E63", 3, 4)],
         
         # Row 5
-        [("Show one day", lambda: gui_functions.show_day_week(gui_vars, plot_vars, df, 0, 1),
+        [("Left to Right", lambda: gui_functions.change_dt(gui_vars, plot_vars, df, 1, 0),
           "#4A90E2", 0, 5),
-         ("Show one week", lambda: gui_functions.show_day_week(gui_vars, plot_vars, df, -3, 7),
+         ("Right to Right", lambda: gui_functions.change_dt(gui_vars, plot_vars, df, 0, 1),
           "#4A90E2", 1, 5),
-         ("Toggle bad x", lambda: gui_functions.toggle_bad_x(gui_vars, plot_vars, df),
+         ("Selected L to R", lambda: gui_functions.change_selected(gui_vars, plot_vars, df, 1, 0),
           "#8D6E63", 2, 5),
-         ("Toggle selected", lambda: gui_functions.toggle_select(gui_vars, plot_vars, df),
+         ("Selected R to R", lambda: gui_functions.change_selected(gui_vars, plot_vars, df, 0, 1),
           "#8D6E63", 3, 5)],
         
         # Row 6
-        [("Show first day", lambda: gui_functions.show_first_day(gui_vars, plot_vars, df),
-          "pink", 0, 6),
-         ("Show all days", lambda: gui_functions.show_all_days(gui_vars, plot_vars, df),
-          "#4A90E2", 1, 6)],
+        [("Show one day", lambda: gui_functions.show_day_week(gui_vars, plot_vars, df, 0, 1),
+          "#4A90E2", 0, 6),
+         ("Show one week", lambda: gui_functions.show_day_week(gui_vars, plot_vars, df, -3, 7),
+          "#4A90E2", 1, 6),
+         ("Toggle bad x", lambda: gui_functions.toggle_bad_x(gui_vars, plot_vars, df),
+          "#8D6E63", 2, 6),
+         ("Toggle selected", lambda: gui_functions.toggle_select(gui_vars, plot_vars, df),
+          "#8D6E63", 3, 6)],
         
         # Row 7
+        [("Show first day", lambda: gui_functions.show_first_day(gui_vars, plot_vars, df),
+          "pink", 0, 7),
+         ("Show all days", lambda: gui_functions.show_all_days(gui_vars, plot_vars, df),
+          "#4A90E2", 1, 7)],
+        
+        # Row 8
         [("Zoom X axis", lambda: gui_functions.zoom_to_rectangle(gui_vars, plot_vars, df, True, False),
-          "#5A8266", 0, 7),
+          "#5A8266", 0, 8),
          ("Zoom Y axis", lambda: gui_functions.zoom_to_rectangle(gui_vars, plot_vars, df, False, True),
-          "#5A8266", 1, 7),
+          "#5A8266", 1, 8),
          ("Zoom XY axis", lambda: gui_functions.zoom_to_rectangle(gui_vars, plot_vars, df, True, True),
-          "#5A8266", 2, 7)]
+          "#5A8266", 2, 8)]
     ]
     
     for row_config in button_configs:
@@ -996,7 +974,7 @@ def setup_middle_buttons(gui_vars, plot_vars, df):
         command=lambda value: gui_functions.update_x_axis(gui_vars, plot_vars, df, value)
     )
     drpdwn_x_axis.config(width=15)
-    drpdwn_x_axis.grid(row=8, column=3, padx=5, pady=3, sticky="ew")
+    drpdwn_x_axis.grid(row=9, column=3, padx=5, pady=3, sticky="ew")
 
 def setup_bottom_buttons(gui_vars, plot_vars, df, df_string, save_path):
     """Set up bottom section buttons (filters and controls)."""
@@ -1719,6 +1697,113 @@ class gui_functions:
                 result_cols.append(data_col)
         
         return result_cols
+    
+    @staticmethod
+    def autofind_uncertain_next(gui_vars, plot_vars, df, feature):
+        """
+        Find next most uncertain point for a specific feature.
+        
+        Navigates to points where the model prediction probability is closest to 50%
+        (most uncertain). Shows a window including all surrounding uncertain points.
+        
+        Args:
+            gui_vars: GUI state variables
+            plot_vars: Plotting state variables
+            df: Data DataFrame
+            feature: Feature name ('GHI', 'DNI', or 'DHI')
+        """
+        log_button_click(f'autofind_uncertain_next_{feature}')
+        
+        plot_vars['toggle_select'] = True
+        plot_vars['toggle_bad_x'] = True
+        
+        # Get probability column for the feature
+        prob_col = f'prob_{feature.lower()}'
+        if prob_col not in plot_vars:
+            log_button_click(f'No probability data available for {feature}')
+            return
+        
+        probabilities = plot_vars[prob_col]
+        
+        # Calculate distance from 0.5 (uncertainty measure)
+        # Only consider points with valid probabilities and within zen limit
+        valid_mask = (~np.isnan(probabilities)) & (plot_vars['zen'] <= plot_vars['zen_ul'])
+        uncertainty = np.abs(probabilities - 0.5)
+        
+        # Create mask for uncertain points (close to 0.5, e.g., within 0.3 of 0.5)
+        # This means probability between 0.2 and 0.8
+        uncertain_mask = valid_mask & (uncertainty <= 0.3)
+        uncertain_indices = df.index[uncertain_mask]
+        
+        if len(uncertain_indices) < 1:
+            # No uncertain points found
+            log_button_click(f'No uncertain points found for {feature}')
+            plot_vars['plot_these_columns'] = [feature]
+            gui_functions.show_all_days(gui_vars, plot_vars, df)
+            plot_vars['mask_select'] = np.full_like(plot_vars['dt'], False, dtype=bool)
+            update_plot(gui_vars, plot_vars, df)
+            return
+        
+        # Find contiguous uncertain regions
+        breaks = np.where(np.diff(uncertain_indices) >= 6)[0]
+        start_indices = np.concatenate([[uncertain_indices[0]], uncertain_indices[breaks + 1]])
+        end_indices = np.concatenate([uncertain_indices[breaks], [uncertain_indices[-1]]])
+        
+        uncertain_regions = np.column_stack((start_indices, end_indices))
+        
+        # For each region, calculate the minimum uncertainty (closest to 0.5)
+        region_uncertainties = []
+        for start_idx, end_idx in uncertain_regions:
+            region_probs = probabilities[start_idx:end_idx+1]
+            region_unc = np.abs(region_probs - 0.5)
+            min_uncertainty = np.nanmin(region_unc)
+            region_uncertainties.append(min_uncertainty)
+        
+        # Sort regions by uncertainty (most uncertain first)
+        sorted_indices = np.argsort(region_uncertainties)
+        sorted_regions = uncertain_regions[sorted_indices]
+        
+        # Get the tracking index for this feature
+        uncertain_idx_key = f'uncertain_index_{feature.lower()}'
+        current_idx = plot_vars[uncertain_idx_key]
+        
+        # Find next region to show
+        if current_idx >= len(sorted_regions):
+            # Wrap around to the beginning
+            current_idx = 0
+        
+        next_region = sorted_regions[current_idx]
+        next_start, next_end = next_region
+        
+        # Update the index for next time
+        plot_vars[uncertain_idx_key] = (current_idx + 1) % len(sorted_regions)
+        
+        # Set the feature column to plot
+        plot_vars['plot_these_columns'] = [feature]
+        
+        # Show the probability plot for this feature
+        plot_vars[f'show_prob_{feature.lower()}'] = True
+        
+        # Update view bounds
+        plot_vars['dt_ll'] = plot_vars['dt'][next_start-44] - 1/24
+        plot_vars['dt_ul'] = plot_vars['dt'][next_end-44] + 1/24
+        
+        plot_vars['rect_x_min'] = plot_vars['dt'][next_start-44]
+        plot_vars['rect_x_max'] = plot_vars['dt'][next_end-44]
+        
+        plot_vars['mask_dt'] = (
+            plot_vars['dt_ll'] <= plot_vars['dt']
+        ) & (plot_vars['dt'] < plot_vars['dt_ul'])
+        
+        plot_vars['mask_select'] = (next_start <= df.index) & (df.index <= next_end)
+        
+        update_plot(gui_vars, plot_vars, df)
+        
+        # Log which uncertainty level we found
+        min_unc = region_uncertainties[sorted_indices[current_idx]]
+        log_button_click(f'Found {feature} uncertain region {current_idx+1}/{len(sorted_regions)} '
+                        f'with uncertainty {min_unc:.3f} (prob closest to {0.5-min_unc:.3f}-{0.5+min_unc:.3f})')
+
     
     @staticmethod
     def reset_limit(gui_vars, plot_vars, df, name, lower, upper):

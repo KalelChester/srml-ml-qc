@@ -2,7 +2,7 @@
 solar_model.py
 ==============
 
-Hybrid Time-Series Solar QC Model (Version 2.0)
+Hybrid Time-Series Solar QC Model
 
 This module implements a sophisticated multi-component quality control system for
 solar irradiance data that combines supervised learning, unsupervised anomaly
@@ -20,8 +20,9 @@ Architecture Overview
    - Provides anomaly scores as meta-features
    - Catches novel failure modes not in training data
 
-3. **Recurrent Neural Network** (RNN with Attention) - NEW in v2.0
-   - Multi-layer GRU processes 24-hour sequences
+3. **Recurrent Neural Network** (RNN with Attention)
+    - Multi-layer GRU processes sequences of length `self.seq_length`
+      (default: 60 samples, intended for 1-minute data)
    - Temporal attention learns critical time steps
    - Residual connections for improved gradient flow
    - Dropout regularization to prevent overfitting
@@ -29,7 +30,7 @@ Architecture Overview
 
 Key Features
 ------------
-- Time-series aware: Processes 24-hour sequences (RNN mode)
+- Time-series aware: Processes sequences of length `self.seq_length` (RNN mode)
 - Temporal context: Learns daily patterns and transitions
 - Attention mechanism: Automatically focuses on important hours
 - Class-weighted training: Handles imbalanced good/bad ratios
@@ -37,7 +38,7 @@ Key Features
 - Safe upsampling: Conservative minority class balancing
 - Dual output: Both binary flags (99/1) and probabilities (0.0-1.0)
 - Model persistence: Save/load with full configuration preservation
-- Backward compatible: Supports both v1.0 (Dense) and v2.0 (RNN) models
+- Backward compatible: Supports model files that may not include newer fields
 
 Output Convention
 -----------------
@@ -58,11 +59,6 @@ Usage Example
     model = SolarHybridModel.load_model('models/model_Flag_GHI.pkl')
     flags, probs = model.predict(test_df, 'Flag_GHI', do_return_probs=True)
 
-Version History
----------------
-- v2.0 (2026): Added RNN architecture with temporal attention
-- v1.0 (2025): Initial hybrid model with Dense NN
-
 Dependencies
 ------------
 - JAX/Flax: Neural network implementation
@@ -71,7 +67,6 @@ Dependencies
 - pandas/numpy: Data manipulation
 
 Author: Solar QC Team
-Last Updated: February 2026
 """
 
 from __future__ import annotations
@@ -86,7 +81,7 @@ from sklearn.ensemble import RandomForestClassifier, IsolationForest
 from sklearn.preprocessing import StandardScaler
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.utils.class_weight import compute_class_weight
-from sklearn.metrics import classification_report
+from sklearn.metrics import classification_report, accuracy_score, precision_score, recall_score, f1_score
 
 
 import tensorflow as tf
@@ -158,7 +153,7 @@ class SolarRNN(nn.Module):
     Example
     -------
         >>> model = SolarRNN(hidden_dim=64, num_layers=2, dropout_rate=0.2)
-        >>> x = jnp.ones((32, 24, 18))  # 32 sequences, 24 hours, 18 features
+        >>> x = jnp.ones((32, 60, 18))  # 32 sequences, 60 time steps, 18 features
         >>> logits = model(x, training=False)
         >>> probs = jax.nn.softmax(logits, axis=1)[:, 1]  # P(GOOD)
     
@@ -293,7 +288,7 @@ class DenseNN(nn.Module):
     - No dropout or regularization (simpler than RNN)
     - Ignores temporal patterns in data
     - Used as fallback when sequence construction fails
-    - Maintained for backward compatibility with v1.0 models
+    - Maintained for backward compatibility with older models
     
     Example
     -------
@@ -531,7 +526,7 @@ def create_sequences(X: np.ndarray, y: np.ndarray, seq_length: int = 24, stride:
 # Hybrid wrapper
 # =============================================================================
 class SolarHybridModel:
-    def __init__(self, use_rnn: bool = True):
+    def __init__(self, use_rnn: bool = True, seq_length: Optional[int] = None):
         """
         Initialize hybrid solar QC model with RF, IF, and NN components.
         
@@ -544,16 +539,21 @@ class SolarHybridModel:
         
         Parameters
         ----------
-        use_rnn : bool, default=True
-            Architecture for neural network component
-            - True: Use RNN (SolarRNN) for temporal sequence modeling
-              * Input shape: (Batch, 24 hours, 18 features)
-              * Learns sunrise/sunset transitions, weather changes
-              * Recommended for solar data with strong daily patterns
-            - False: Use Dense NN for feature-based prediction
-              * Input shape: (Batch, 18 features)
-              * Faster training, simpler implementation
-              * Use if sequence data unavailable
+                use_rnn : bool, default=True
+                        Architecture for neural network component
+                        - True: Use RNN (SolarRNN) for temporal sequence modeling
+                            * Input shape: (Batch, seq_length, 18 features)
+                            * Learns sunrise/sunset transitions, weather changes
+                            * Recommended for solar data with strong daily patterns
+                        - False: Use Dense NN for feature-based prediction
+                            * Input shape: (Batch, 18 features)
+                            * Faster training, simpler implementation
+                            * Use if sequence data unavailable
+
+                seq_length : int, optional
+                        Sequence length for RNN mode
+                        - If None, defaults to 60 (intended for 1-minute data)
+                        - Configure based on sampling interval and desired window
         
         Model Components Initialized
         ----------------------------
@@ -592,9 +592,9 @@ class SolarHybridModel:
             Architecture choice (set at initialization)
         
         self.seq_length : int
-            Sequence length for RNN mode (always 24)
-            - 24 hours of hourly data for daily patterns
-            - Cannot be changed after initialization
+            Sequence length for RNN mode (configurable)
+            - Default 60 (intended for 1-minute data)
+            - Can be tuned based on sampling interval
         
         self.common_features : list
             Expected feature columns (set at initialization)
@@ -646,7 +646,7 @@ class SolarHybridModel:
         
         # Configuration
         self.use_rnn = use_rnn
-        self.seq_length = 60  # 60 samples = 1 hour of 1-minute data (temporal context for sunrise/sunset)
+        self.seq_length = int(seq_length) if seq_length is not None else 60
 
         # Feature set (must mirror solar_features.add_features)
         self.common_features = [
@@ -683,7 +683,8 @@ class SolarHybridModel:
             epochs: int = 20,
             batch_size: int = 64,
             upsample_min_bad: int = 500,
-            synthetic_frac: float = 0.0):
+            synthetic_frac: float = 0.0,
+            eval_split: float = 0.2):
         """
         Train the complete hybrid model: RF + IsolationForest + NN (RNN or Dense).
         
@@ -775,9 +776,9 @@ class SolarHybridModel:
            - Normalize to mean=0, std=1
            - Critical for NN convergence
         
-        9. **Sequence Creation (RNN Mode Only)**
-           - Transform (n_samples, features) -> (n_sequences, 24, features)
-           - 24-hour sliding windows with stride=1
+          9. **Sequence Creation (RNN Mode Only)**
+              - Transform (n_samples, features) -> (n_sequences, seq_length, features)
+              - Sliding windows with stride=5
            - Generate new labels at last time step of each sequence
         
         10. **NN Training**
@@ -853,25 +854,32 @@ class SolarHybridModel:
         print(f"    [fit] Training base RF on {len(X)} rows (target={target_col})")
         self.rf.fit(X, y)
 
+        def _rf_prob_from_model(model, features):
+            proba = model.predict_proba(features)
+            if proba.shape[1] == 1:
+                only_class = int(model.classes_[0])
+                return np.ones(len(features)) if only_class == 1 else np.zeros(len(features))
+            return proba[:, 1]
+
         # safe calibrated probabilities (if viable)
         # CalibratedClassifierCV requires at least one sample per class in each fold
         classes, counts = np.unique(y, return_counts=True)
         min_class_count = int(min(counts)) if len(counts) > 0 else 0
         self.rf_cal = None
         try:
-            if min_class_count >= 3:
+            if min_class_count >= 3 and len(classes) >= 2:
                 cv = min(5, min_class_count)
                 self.rf_cal = CalibratedClassifierCV(self.rf, method='isotonic', cv=cv)
                 self.rf_cal.fit(X, y)
-                rf_prob = self.rf_cal.predict_proba(X)[:, 1]
+                rf_prob = _rf_prob_from_model(self.rf_cal, X)
             else:
                 # fallback: use raw RF probabilities
-                rf_prob = self.rf.predict_proba(X)[:, 1]
+                rf_prob = _rf_prob_from_model(self.rf, X)
                 print("    [fit] WARNING: too few minority samples for robust calibration; using raw RF probs")
         except Exception as e:
             print(f"    [fit] Calibration failed ({e}); using raw RF probs")
             self.rf_cal = None
-            rf_prob = self.rf.predict_proba(X)[:, 1]
+            rf_prob = _rf_prob_from_model(self.rf, X)
 
         # ---------------- unsupervised detector (IsolationForest) -------
         # Train IF on GOOD samples only (so that lower IF score = more anomalous)
@@ -1044,6 +1052,40 @@ class SolarHybridModel:
         else:
             print("    [fit] NN training complete (RNN diagnostics skipped - different data shape)")
 
+        # ---------------- train/test diagnostics (ensemble) -------------------
+        # Evaluate on original labeled data using time-ordered split
+        try:
+            eval_df = train_df.copy()
+            if 'Timestamp_dt' in eval_df.columns:
+                eval_df = eval_df.sort_values('Timestamp_dt')
+
+            n_total = len(eval_df)
+            n_test = int(max(1, n_total * float(eval_split))) if n_total > 1 else 0
+
+            if n_test > 0 and n_total - n_test > 0:
+                split_idx = n_total - n_test
+                train_eval = eval_df.iloc[:split_idx]
+                test_eval = eval_df.iloc[split_idx:]
+
+                def _score_split(split_name, split_df):
+                    y_true = np.where(split_df[target_col] == 99, 0, 1).astype(int)
+                    y_pred_flags = self.predict(split_df, target_col)
+                    y_pred = np.where(y_pred_flags == 99, 0, 1).astype(int)
+                    acc = accuracy_score(y_true, y_pred)
+                    prec = precision_score(y_true, y_pred, zero_division=0)
+                    rec = recall_score(y_true, y_pred, zero_division=0)
+                    f1 = f1_score(y_true, y_pred, zero_division=0)
+                    print(
+                        f"    [fit] {split_name} metrics: "
+                        f"acc={acc:.4f} prec={prec:.4f} rec={rec:.4f} f1={f1:.4f}"
+                    )
+
+                print(f"    [fit] Diagnostics (eval_split={eval_split:.2f})")
+                _score_split('train', train_eval)
+                _score_split('test', test_eval)
+        except Exception as e:
+            print(f"    [fit] Diagnostics skipped due to error: {e}")
+
         # store last-fit artifacts (RF, rf_cal, scaler, if_det, nn_state) on self
         # they are already attributes of self
 
@@ -1091,15 +1133,15 @@ class SolarHybridModel:
            - Normalized to [0, 1] range
            - Treated as meta-feature for NN
         
-        4. **NN Input Preparation**
+          4. **NN Input Preparation**
            - Combine RF features with meta-features:
              * RF_Prob: RandomForest's P(GOOD)
              * IF_Score: IsolationForest anomaly score
            - Scale features via pre-fitted StandardScaler
-           - Create 24-hour sequences (RNN mode only)
+              - Create sequences of length `self.seq_length` (RNN mode only)
         
         5. **NN Prediction**
-           - RNN mode: Process 24-hour windows, aggregate final layer
+           - RNN mode: Process seq_length windows, aggregate final layer
            - Dense mode: Direct classification on features
            - Output: logits, convert to P(GOOD) via softmax
         
@@ -1220,13 +1262,20 @@ class SolarHybridModel:
         # ------------------------------------------------------------------
         # We always try the calibrated model first.
         # If calibration failed or is unavailable, fall back safely.
+        def _rf_prob_from_model(model, features):
+            proba = model.predict_proba(features)
+            if proba.shape[1] == 1:
+                only_class = int(model.classes_[0])
+                return np.ones(len(features)) if only_class == 1 else np.zeros(len(features))
+            return proba[:, 1]
+
         if self.rf_cal is not None:
             try:
-                rf_prob = self.rf_cal.predict_proba(X_rf)[:, 1]
+                rf_prob = _rf_prob_from_model(self.rf_cal, X_rf)
             except Exception:
-                rf_prob = self.rf.predict_proba(X_rf)[:, 1]
+                rf_prob = _rf_prob_from_model(self.rf, X_rf)
         else:
-            rf_prob = self.rf.predict_proba(X_rf)[:, 1]
+            rf_prob = _rf_prob_from_model(self.rf, X_rf)
 
         # ------------------------------------------------------------------
         # 3. Build NN input matrix (RF features + meta-features)
@@ -1325,7 +1374,7 @@ class SolarHybridModel:
         - NN parameters (RNN or Dense weights)
         - Common features list (for predict-time validation)
         - Configuration (use_rnn, seq_length)
-        - Version tag (2.0 for RNN-enabled)
+        - Schema tag for forward compatibility
         
         Parameters
         ----------
@@ -1340,7 +1389,7 @@ class SolarHybridModel:
         -----------
         Python pickle (.pkl)
         - Human-unreadable but fast and complete
-        - Backward compatible with v1.0 models
+        - Backward compatible with older model files
         - Contains full JAX pytree (NN parameters)
         - File size: typically 50-500 KB
         
@@ -1354,10 +1403,9 @@ class SolarHybridModel:
         
         Backward Compatibility
         ----------------------
-        - v2.0 (RNN-enabled): Saves use_rnn=True/False in dict
-        - v1.0 (Dense-only): Old models detected and loaded correctly
-        - Loading v1.0: Uses DenseNN architecture
-        - Loading v2.0: Uses RNN or Dense based on saved flag
+        - Older model files missing newer fields are supported
+        - Missing fields are filled with safe defaults
+        - Dense-only models load and run without RNN components
         
         Usage
         -----
@@ -1383,7 +1431,7 @@ class SolarHybridModel:
         - Use load_model() classmethod to restore
         - Saved at any point (only components set so far are saved)
         - Can save even if not fully trained (partial model)
-        - Version '2.0' added to support future format changes
+        - Schema tag included to support future format changes
         
         See Also
         --------
@@ -1424,7 +1472,7 @@ class SolarHybridModel:
         Load a trained model from disk for prediction.
         
         Restores all model components and configuration from a saved pickle file,
-        enabling prediction without retraining. Supports both v1.0 and v2.0 formats.
+        enabling prediction without retraining. Supports older model file formats.
         
         Parameters
         ----------
@@ -1446,7 +1494,7 @@ class SolarHybridModel:
         -------------------------
         1. **Load Pickle**
            - Deserialize model_dict from disk
-           - Handles both v1.0 and v2.0 formats
+           - Handles older model file formats
         
         2. **Architecture Detection**
            - Read use_rnn flag from file
@@ -1470,20 +1518,17 @@ class SolarHybridModel:
              * Skip NN restoration
              * Model usable but without NN component
         
-        5. **Validation**
-           - Print model type and version
-           - Check file existence
-           - Raise error if file not found
-        
-        File Format Support
-        -------------------
-        Backward Compatible:
-        - v1.0: Old models (Dense-only) detected and loaded
-          * use_rnn field missing (defaults to False)
-          * seq_length field missing (defaults to 24)
-        - v2.0: New models (RNN-enabled)
-          * use_rnn explicitly saved
-          * seq_length saved
+          5. **Validation**
+              - Print model type and schema tag
+              - Check file existence
+              - Raise error if file not found
+
+          File Format Support
+          -------------------
+          Backward Compatible:
+          - Older model files missing newer fields are supported
+             * use_rnn field missing (defaults to False)
+             * seq_length field missing (defaults to the class default)
         
         Usage Examples
         ---------------
@@ -1506,7 +1551,7 @@ class SolarHybridModel:
         - FileNotFoundError: If filepath doesn't exist
         - pickle.UnpicklingError: If file is corrupted
         - ValueError: If model_dict missing critical keys
-        - Version mismatch: Handled gracefully (defaults used)
+        - Schema tag mismatch: Handled gracefully (defaults used)
         
         Performance
         -----------
@@ -1527,11 +1572,6 @@ class SolarHybridModel:
         save_model() : Save trained model to disk
         predict() : Use loaded model for prediction
         fit() : Train new model
-        
-        Version History
-        ----------------
-        v2.0: Added RNN support, use_rnn flag
-        v1.0: Original Dense-only models
         """
         if not os.path.exists(filepath):
             raise FileNotFoundError(f"Model file not found: {filepath}")
@@ -1552,7 +1592,7 @@ class SolarHybridModel:
         model.scaler = model_dict['scaler']
         model.common_features = model_dict['common_features']
         model.use_rnn = use_rnn
-        model.seq_length = model_dict.get('seq_length', 24)
+        model.seq_length = model_dict.get('seq_length', model.seq_length)
         
         # Restore NN state
         nn_params = model_dict.get('nn_params')

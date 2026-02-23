@@ -5,14 +5,21 @@ predict_with_saved_model.py
 Demonstrates how to load a saved model and make predictions on new data
 without retraining.
 
+IMPORTANT: By default, this script PRESERVES existing bad flags (99) and only
+updates good flags (1). This protects manual QC work. Use --overwrite-all-flags
+to replace all flags with model predictions.
+
 Usage examples:
-    # Predict on a single file
+    # Predict on a single file (preserves existing bad flags):
     python predict_with_saved_model.py --file data/STW_2025/STW_2025-07_QC.csv
     
-    # Predict on a date range
+    # Predict on a date range (preserves existing bad flags):
     python predict_with_saved_model.py --start "2025-07-01" --end "2025-08-31"
     
-    # Specify which models to use
+    # Overwrite ALL flags (use with caution - deletes manual QC):
+    python predict_with_saved_model.py --file data/STW_2025/STW_2025-07_QC.csv --overwrite-all-flags
+    
+    # Specify which models to use:
     python predict_with_saved_model.py --start "2025-07-01" --end "2025-08-31" --targets Flag_GHI Flag_DNI
 """
 
@@ -24,6 +31,8 @@ import numpy as np
 
 from solar_features import add_features
 from solar_model import SolarHybridModel
+from config import SITE_CONFIG
+from io_utils import load_qc_csvs
 
 
 # ---------------- CONFIG ----------------
@@ -33,45 +42,27 @@ HEADER_ROWS_SKIP = 43
 HEADER_ROWS_PRESERVE = 44
 TS_COL = 'YYYY-MM-DD--HH:MM:SS'
 
-SITE_CONFIG = {
-    'latitude': 47.654,
-    'longitude': -122.309,
-    'altitude': 70,
-    'timezone': 'Etc/GMT+8'
-}
-
 # Confidence thresholds (match training settings)
 HIGH_THRESH = 0.51
 LOW_THRESH = 0.49
 
 
-# ---------------- I/O helpers ----------------
-def load_csvs(file_paths):
-    """Load CSV files with headers preserved."""
-    frames = []
-    for f in file_paths:
-        try:
-            df = pd.read_csv(f, skiprows=HEADER_ROWS_SKIP)
-            df.columns = [c.strip() for c in df.columns]
-            if 'Data_Begins_Next_Row' in df.columns:
-                df = df.drop(columns=['Data_Begins_Next_Row'])
-            df['_source_file'] = f
-            if TS_COL in df.columns:
-                df['_raw_ts'] = df[TS_COL].astype(str).str.strip()
-            else:
-                df['_raw_ts'] = df.iloc[:, 0].astype(str).str.strip()
-            frames.append(df)
-        except Exception as e:
-            print(f"Skipping {f}: {e}")
-    
-    if len(frames) == 0:
-        return pd.DataFrame()
-    
-    return pd.concat(frames, ignore_index=True)
 
 
-def write_predictions(df_preds: pd.DataFrame, target_col: str):
-    """Write predictions back to source files."""
+def write_predictions(df_preds: pd.DataFrame, target_col: str, preserve_bad_flags: bool = True):
+    """Write predictions back to source files.
+    
+    Parameters
+    ----------
+    df_preds : pd.DataFrame
+        Dataframe containing predictions with '_source_file', '_raw_ts', target_col, and prob columns
+    target_col : str
+        Name of the flag column (e.g., 'Flag_GHI')
+    preserve_bad_flags : bool, default=True
+        If True (DEFAULT), preserves existing bad flags (99) and only updates good flags (1).
+        This implements an "OR" operation where bad flags stay bad, protecting manual QC.
+        If False, overwrites all flags with model predictions.
+    """
     prob_col = f"{target_col}_prob"
     
     for path, g in df_preds.groupby('_source_file'):
@@ -89,7 +80,18 @@ def write_predictions(df_preds: pd.DataFrame, target_col: str):
             # Update flags
             def update_flag(row):
                 ts = str(row[TS_COL]).strip() if TS_COL in row.index else str(row.iloc[0]).strip()
-                return pred_map.get(ts, row.get(target_col, 0))
+                predicted_flag = pred_map.get(ts, row.get(target_col, 0))
+                
+                if preserve_bad_flags:
+                    # Preserve existing bad flags (99), only update good flags (1)
+                    original_flag = row.get(target_col, 1)
+                    if original_flag == 99:
+                        return 99  # Keep the existing bad flag
+                    else:
+                        return predicted_flag  # Update with prediction
+                else:
+                    # Default: overwrite with prediction
+                    return predicted_flag
             
             orig[target_col] = orig.apply(update_flag, axis=1)
             
@@ -116,7 +118,8 @@ def write_predictions(df_preds: pd.DataFrame, target_col: str):
 
 
 # ---------------- Main prediction function ----------------
-def predict_with_model(file_paths: list, targets: list, write_back: bool = True):
+def predict_with_model(file_paths: list, targets: list, write_back: bool = True, 
+                       preserve_bad_flags: bool = True):
     """
     Load saved models and predict on specified files.
     
@@ -128,6 +131,10 @@ def predict_with_model(file_paths: list, targets: list, write_back: bool = True)
         List of target columns (e.g., ['Flag_GHI', 'Flag_DNI', 'Flag_DHI'])
     write_back : bool
         If True, write predictions back to source files
+    preserve_bad_flags : bool, default=True
+        If True (DEFAULT), preserves existing bad flags (99) and only updates good flags (1).
+        This protects manual QC flags from being overwritten by model predictions.
+        If False, all flags are overwritten with model predictions.
     
     Returns
     -------
@@ -137,7 +144,7 @@ def predict_with_model(file_paths: list, targets: list, write_back: bool = True)
     
     # Load data
     print(f"\nLoading {len(file_paths)} file(s)...")
-    raw = load_csvs(file_paths)
+    raw = load_qc_csvs(file_paths, header_rows_skip=HEADER_ROWS_SKIP, ts_col=TS_COL)
     
     if raw.empty:
         print("No data found!")
@@ -196,10 +203,12 @@ def predict_with_model(file_paths: list, targets: list, write_back: bool = True)
         
         # Write back if requested
         if write_back:
-            print("Writing predictions back to source files...")
+            mode_msg = " (preserving existing bad flags)" if preserve_bad_flags else " (OVERWRITING ALL FLAGS)"
+            print(f"Writing predictions back to source files{mode_msg}...")
             write_predictions(
                 pred_df[['_source_file', '_raw_ts', target, prob_col]],
-                target
+                target,
+                preserve_bad_flags=preserve_bad_flags
             )
         
         results[target] = pred_df
@@ -215,20 +224,26 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Predict on a single file
+  # Predict on a single file (DEFAULT: preserves existing bad flags)
   python predict_with_saved_model.py --file data/STW_2025/STW_2025-07_QC.csv
   
   # Predict on multiple files
   python predict_with_saved_model.py --file data/STW_2025/STW_2025-07_QC.csv data/STW_2025/STW_2025-08_QC.csv
   
-  # Predict on a date range
+  # Predict on a date range (preserves existing bad flags)
   python predict_with_saved_model.py --start "2025-07-01" --end "2025-08-31"
+  
+  # Overwrite ALL flags (use with caution - deletes manual QC)
+  python predict_with_saved_model.py --start "2025-07-01" --end "2025-08-31" --overwrite-all-flags
   
   # Only predict specific targets
   python predict_with_saved_model.py --start "2025-07-01" --end "2025-08-31" --targets Flag_GHI Flag_DNI
   
   # Predict without writing back (dry run)
   python predict_with_saved_model.py --file data/STW_2025/STW_2025-07_QC.csv --no-write
+
+Note: By DEFAULT, existing bad flags (99) are preserved to protect manual QC.
+      Use --overwrite-all-flags to replace all flags with model predictions.
         """
     )
     
@@ -239,6 +254,10 @@ Examples:
                         help='Target columns to predict (default: Flag_GHI Flag_DNI Flag_DHI)')
     parser.add_argument('--no-write', action='store_true',
                         help='Do not write predictions back to files (dry run)')
+    parser.add_argument('--overwrite-all-flags', action='store_true',
+                        help='Overwrite ALL flags with model predictions, including existing bad flags (99). '
+                             'By DEFAULT, existing bad flags are preserved to protect manual QC. '
+                             'Use this flag only when you want to completely replace all flags.')
     
     args = parser.parse_args()
     
@@ -276,7 +295,8 @@ Examples:
     predict_with_model(
         file_paths=file_paths,
         targets=args.targets,
-        write_back=not args.no_write
+        write_back=not args.no_write,
+        preserve_bad_flags=not args.overwrite_all_flags  # Default True, False if --overwrite-all-flags
     )
 
 

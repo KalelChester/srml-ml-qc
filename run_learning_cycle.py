@@ -2,34 +2,36 @@
 run_learning_cycle.py
 =====================
 
-Training and Prediction Orchestration with Confidence-Gated Writeback
+Training and Prediction Orchestration with Synthetic Data Augmentation
 
 This script orchestrates the complete machine learning workflow for solar irradiance
-quality control, from data loading through model training to intelligent prediction
-writeback with confidence-based filtering.
+quality control, from data loading through model training to prediction, with optional
+synthetic data augmentation using error injection.
 
 Workflow Overview
 -----------------
 1. Load raw CSV files from data directory
 2. Engineer features (temporal, solar geometry, anomalies)
-3. Split data into training and prediction periods
-4. Train hybrid RNN models for each target (GHI, DNI, DHI)
-5. Generate predictions with probability scores
-6. Write back high-confidence predictions automatically
-7. Queue uncertain predictions for manual review
+3. Extract training data from specified date range
+4. [OPTIONAL] Augment training data with synthetic error-injected samples:
+   - Randomly sample whole months from training period (not necessarily continuous)
+   - Inject realistic errors using error_injection module
+   - Combine synthetic data with original training data
+5. Train hybrid RNN models for each target (GHI, DNI, DHI) on augmented data
+6. Save trained models to models/ folder
+7. Run predictions on prediction period using predict_with_saved_model
 
 Key Features
 ------------
-- **Confidence Gating**: Only auto-writes predictions with high certainty
-  - P(GOOD) >= 0.51: Automatically flag as GOOD
-  - P(GOOD) <= 0.49: Automatically flag as BAD  
-  - 0.49 < P(GOOD) < 0.51: Send to manual review queue
-  
-- **RNN Time-Series Models**: Uses 24-hour sequences for temporal awareness
+- **Synthetic Data Augmentation**: Configurable ratio (default 2:1 real:synthetic)
+  - Samples whole months from training data (e.g., Feb, Apr, Jun from Jan-Jun)
+  - Injects realistic errors to create more bad data examples
+  - Increases model robustness to various failure modes
+- **RNN Time-Series Models**: Uses fixed-length sequences for temporal awareness
 - **Model Persistence**: Saves trained models for reuse without retraining
+- **Automatic Prediction**: Calls predict_with_saved_model after training
+- **Flag Preservation**: By default, preserves existing bad flags (99) during predictions
 - **Header Preservation**: Maintains original CSV header rows (43 metadata + 1 column names)
-- **Review Queue**: Uncertain predictions logged for human verification
-- **Probability Tracking**: Writes P(GOOD) scores alongside flags
 
 Configuration
 -------------
@@ -42,31 +44,43 @@ SITE_CONFIG:
     - timezone: Local timezone string (e.g., 'Etc/GMT+8', 'America/Los_Angeles')
                 Used ONLY for solar position calculations, does NOT convert times
 
-HIGH_THRESH / LOW_THRESH:
-    - Confidence thresholds for auto-write decisions
-    - Default: 0.51 / 0.49 (very conservative, most go to review)
-    - Increase gap for more auto-writes: e.g., 0.7 / 0.3
+SYNTHETIC_DATA_RATIO:
+    - Ratio of real to synthetic training data (default: 2.0 = 2:1)
+    - E.g., 6 months real data + 3 months synthetic = 9 months total
+    - Set to 0 to disable augmentation
+    - Higher ratio = less synthetic data (3.0 = 3:1 means only 1/3 as much synthetic)
 
 TRAIN/PRED Dates:
     - Define training period and prediction period
     - Recommendation: 3-4 months training, 1-2 months prediction
+    - Augmentation samples from training period only
 
 Usage
 -----
-1. Set SITE_CONFIG with your location details
-2. Adjust date ranges for training/prediction periods
-3. Verify DATA_FOLDER contains CSV files with proper structure
-4. Run: python run_learning_cycle.py
-5. Check models/ folder for saved models
-6. Check review_requests.csv for uncertain predictions
+1. Update SITE_CONFIG in config.py with your location details
+2. Adjust SYNTHETIC_DATA_RATIO for desired augmentation level
+3. Adjust date ranges for training/prediction periods in main block
+4. Verify DATA_FOLDER contains CSV files with proper structure
+5. Run: python run_learning_cycle.py
+6. Check models/ folder for saved models
+7. Check updated CSVs for predictions with Flag_* and Flag_*_prob columns
 
 Output Files
 ------------
 - models/model_Flag_GHI.pkl: Trained GHI quality model
 - models/model_Flag_DNI.pkl: Trained DNI quality model
 - models/model_Flag_DHI.pkl: Trained DHI quality model
-- review_requests.csv: Predictions needing manual review
 - Updated source CSVs: With Flag_* and Flag_*_prob columns
+
+Synthetic Data Augmentation Details
+------------------------------------
+- Samples whole months randomly (not necessarily continuous)
+- E.g., from Jan-Jun training, might sample Feb, Apr, Jun
+- Uses error_injection module to inject realistic errors
+- Automatically flags injected errors as bad (99)
+- Re-engineers features after error injection
+- Preserves temporal structure within each month
+- Increases diversity of failure modes in training set
 
 File Structure Expected
 -----------------------
@@ -83,21 +97,27 @@ Notes
 -----
 - Timestamps assumed to be in correct local time (no conversion applied)
 - Missing columns handled gracefully with safe defaults
-- Models train on RNN architecture by default (v2.0)
-- Backward compatible with v1.0 Dense models
-
-Version: 2.0 (RNN-enabled)
-Author: Solar QC Team
-Last Updated: February 2026
+- Models train on RNN architecture by default
+- Predictions preserve existing bad flags (99) by default
+- Use preserve_bad_flags=False in run_cycle() to overwrite all flags
+- Synthetic augmentation improves model performance on rare failure modes
+- Augmentation ratio can be overridden per run_cycle() call
 """
 
 import os
 import glob
 import pandas as pd
 import numpy as np
+import random
+from datetime import datetime
+from dateutil.relativedelta import relativedelta
 
 from solar_features import add_features
 from solar_model import SolarHybridModel
+from predict_with_saved_model import predict_with_model
+from error_injection import ErrorInjectionPipeline
+from config import SITE_CONFIG
+from io_utils import load_qc_csvs
 
 
 # ---------------- CONFIG ----------------
@@ -107,292 +127,248 @@ HEADER_ROWS_SKIP = 43  # Number of rows to skip when reading (skips rows 0-42, u
 HEADER_ROWS_PRESERVE = 44  # Number of rows to preserve when writing back (rows 0-43 including column names)
 TS_COL = 'YYYY-MM-DD--HH:MM:SS'
 
-SITE_CONFIG = {
-    'latitude': 47.654,     # <-- SET ME
-    'longitude': -122.309,  # <-- SET ME
-    'altitude': 70,   # meters (optional)
-    'timezone': 'Etc/GMT+8'
-}
+SEQ_WINDOW_MINUTES = 60  # Target window in minutes for RNN sequence length
 
-# confidence thresholds for auto-write (tunable)
-HIGH_THRESH = 0.51  # prob >= HIGH_THRESH => auto write GOOD
-LOW_THRESH = 0.49   # prob <= LOW_THRESH  => auto write BAD
-
-REVIEW_OUT = 'review_requests.csv'  # appended with rows needing manual review
+# Synthetic data augmentation ratio
+# Ratio of real training data to synthetic error-injected data
+# Default 2:1 means if training on 6 months, sample 3 months for error injection
+# Total training data becomes 9 months (6 real + 3 synthetic)
+SYNTHETIC_DATA_RATIO = 2.0  # real:synthetic (e.g., 2.0 = 2:1, 3.0 = 3:1, etc.)
 
 
-# ---------------- I/O helpers ----------------
-def load_csvs(file_paths):
+def infer_seq_length(df: pd.DataFrame, window_minutes: int) -> int:
     """
-    Load and concatenate multiple QC CSV files into a single DataFrame.
-    
-    This function handles the specialized CSV format with 44 header rows,
-    performs basic cleaning, and tracks source file provenance.
-    
-    Parameters
-    ----------
-    file_paths : list of str
-        Absolute paths to CSV files to load.
-    
-    Returns
-    -------
-    pd.DataFrame
-        Concatenated DataFrame with columns:
-        - All original data columns (GHI, DNI, DHI, flags, etc.)
-        - _source_file : str - Path to origin CSV for writeback
-        - _raw_ts : str - Original timestamp string for exact matching
-        Empty DataFrame if all files fail to load.
-    
-    Processing Steps
-    ----------------
-    1. Skip first 43 metadata rows
-    2. Strip whitespace from column names
-    3. Drop empty 'Data_Begins_Next_Row' column if present
-    4. Store source file path for writeback
-    5. Extract raw timestamp strings for exact matching
-    6. Concatenate all valid files
-    
-    Error Handling
-    --------------
-    - Files that fail to parse are skipped with warning message
-    - Returns empty DataFrame if no files successfully load
-    - Timestamps fall back to first column if TS_COL not found
-    
-    Notes
-    -----
-    - Timestamps preserved as strings to avoid any conversion
-    - Column names stripped to handle inconsistent whitespace
-    - Source tracking enables targeted writeback
+    Infer RNN sequence length from median sampling interval.
     """
-    frames = []
-    for f in file_paths:
-        try:
-            df = pd.read_csv(f, skiprows=HEADER_ROWS_SKIP)
-            df.columns = [c.strip() for c in df.columns]
-            # Drop the empty Data_Begins_Next_Row column if present
-            if 'Data_Begins_Next_Row' in df.columns:
-                df = df.drop(columns=['Data_Begins_Next_Row'])
-            df['_source_file'] = f
-            # Make sure timestamp column exists and raw ts col
-            if TS_COL in df.columns:
-                df['_raw_ts'] = df[TS_COL].astype(str).str.strip()
-            else:
-                # fallback: first column
-                df['_raw_ts'] = df.iloc[:, 0].astype(str).str.strip()
-            frames.append(df)
-        except Exception as e:
-            print(f"Skipping {f}: {e}")
-    if len(frames) == 0:
-        return pd.DataFrame()
-    out = pd.concat(frames, ignore_index=True)
-    return out
+    if 'Timestamp_dt' not in df.columns:
+        return 60
 
+    times = pd.to_datetime(df['Timestamp_dt'], errors='coerce').dropna().sort_values()
+    if len(times) < 2:
+        return 60
 
-def write_back(df_preds: pd.DataFrame, target_col: str):
-    """
-    Write high-confidence predictions back to source CSVs, queue uncertain ones.
-    
-    Implements confidence-gated writeback: only predictions with extreme
-    probabilities are auto-written to CSV, while uncertain predictions are
-    saved to a review queue for manual verification.
-    
-    Parameters
-    ----------
-    df_preds : pd.DataFrame
-        Predictions DataFrame with columns:
-        - _source_file : str - Path to source CSV
-        - _raw_ts : str - Raw timestamp for exact matching
-        - {target_col} : str - Predicted flag (e.g., 'GOOD', 'BAD')
-        - {target_col}_prob : float - P(GOOD), range [0, 1]
-        - AutoWrite : bool - Whether confidence exceeds threshold
-    
-    target_col : str
-        Name of target column (e.g., 'Flag_GHI', 'Flag_DNI')
-    
-    Confidence Gating Logic
-    -----------------------
-    For each prediction:
-    - P(GOOD) >= HIGH_THRESH (0.51): Write 'GOOD' to CSV
-    - P(GOOD) <= LOW_THRESH (0.49): Write 'BAD' to CSV
-    - Between thresholds: Skip CSV write, add to review queue
-    
-    File Operations
-    ---------------
-    1. Group predictions by source file
-    2. Load original CSV (preserving all 44 header rows)
-    3. Match timestamps exactly via _raw_ts
-    4. Update only AutoWrite=True rows:
-       - Set {target_col} to predicted flag
-       - Set {target_col}_prob to probability score
-    5. Write modified CSV back (header intact)
-    6. Append uncertain predictions to REVIEW_OUT
-    
-    Review Queue Format
-    -------------------
-    review_requests.csv contains:
-    - source_file: Origin path
-    - timestamp: Raw timestamp string
-    - target: Column name (Flag_GHI/DNI/DHI)
-    - predicted_flag: Model's prediction
-    - probability: P(GOOD) score
-    
-    Error Handling
-    --------------
-    - Files that fail to open are skipped with warning
-    - Missing columns handled gracefully
-    - Probability column created if absent
-    - Timestamp mismatches logged (should be rare)
-    
-    Notes
-    -----
-    - Preserves CSV header metadata (43 rows)
-    - Uses exact string matching for timestamps (no parsing)
-    - Appends to review queue (doesn't overwrite)
-    - Only touches rows with confident predictions
-    """
-    review_rows = []
+    deltas = times.diff().dt.total_seconds().div(60.0)
+    delta_minutes = float(deltas[deltas > 0].median()) if len(deltas) > 0 else 0.0
+    if not np.isfinite(delta_minutes) or delta_minutes <= 0:
+        return 60
 
-    for path, g in df_preds.groupby('_source_file'):
-        try:
-            orig = pd.read_csv(path, skiprows=HEADER_ROWS_SKIP)
-            orig.columns = [c.strip() for c in orig.columns]
-            # Drop the empty trailing column if it exists (from trailing commas in CSV)
-            if 'Data_Begins_Next_Row' in orig.columns:
-                orig = orig.drop(columns=['Data_Begins_Next_Row'])
-        except Exception as e:
-            print(f"Failed to open {path} for writing: {e}")
-            continue
-
-        # Build mapping only for rows where AutoWrite == True
-        if 'AutoWrite' in g.columns:
-            to_write = g[g['AutoWrite'] == True]
-        else:
-            # fallback: write where prob is extreme
-            prob_col = f"{target_col}_prob"
-            if prob_col in g.columns:
-                pw = g[(g[prob_col] >= HIGH_THRESH) | (g[prob_col] <= LOW_THRESH)]
-                to_write = pw.copy()
-            else:
-                to_write = g.copy()
-
-        write_map = to_write.set_index('_raw_ts')[target_col].to_dict()
-
-        # Update original data only for timestamps in write_map
-        def upd(row):
-            ts = str(row[TS_COL]).strip() if TS_COL in row.index else str(row.iloc[0]).strip()
-            if ts in write_map:
-                return write_map[ts]
-            return row.get(target_col, row.get(target_col, 0))
-
-        orig[target_col] = orig.apply(upd, axis=1)
-
-        # Ensure we preserve any existing prob column; else add it as NaNs
-        prob_col = f"{target_col}_prob"
-        if prob_col in g.columns:
-            prob_map = g.set_index('_raw_ts')[prob_col].to_dict()
-            def upd_prob(row):
-                ts = str(row[TS_COL]).strip() if TS_COL in row.index else str(row.iloc[0]).strip()
-                return prob_map.get(ts, row.get(prob_col, np.nan))
-            orig[prob_col] = orig.apply(upd_prob, axis=1)
-        else:
-            # add NA prob column
-            orig[prob_col] = np.nan
-
-        # Drop the empty Data_Begins_Next_Row column if present (caused by trailing comma in CSV)
-        if 'Data_Begins_Next_Row' in orig.columns:
-            orig = orig.drop(columns=['Data_Begins_Next_Row'])
-
-        # Write the file with original header preserved
-        try:
-            with open(path, 'r') as f:
-                header_lines = [next(f) for _ in range(HEADER_ROWS_PRESERVE)]
-            with open(path, 'w', newline='') as f:
-                f.writelines(header_lines)
-                orig.to_csv(f, index=False, header=False)  # header=False since we already wrote it
-        except Exception as e:
-            print(f"Failed writing back to {path}: {e}")
-
-        # Record review rows (those not auto-written within this file)
-        not_written = g[~g['_raw_ts'].isin(to_write['_raw_ts'])]
-        if not not_written.empty:
-            review_rows.append(not_written.assign(_source_file_write=path))
-
-    # Append reviews to REVIEW_OUT
-    if len(review_rows) > 0:
-        df_reviews = pd.concat(review_rows, ignore_index=True)
-        if os.path.exists(REVIEW_OUT):
-            df_reviews.to_csv(REVIEW_OUT, mode='a', header=False, index=False)
-        else:
-            df_reviews.to_csv(REVIEW_OUT, index=False)
+    return max(1, int(round(window_minutes / delta_minutes)))
 
 
 # ---------------- Main cycle ----------------------------------------------
 
-def run_cycle(train_start: str, train_end: str, pred_start: str, pred_end: str, targets: list[str]):
-    files = sorted(glob.glob(os.path.join(DATA_FOLDER, '**', '*.csv'), recursive=True))
-    raw = load_csvs(files)
+def run_cycle(train_start: str, train_end: str, pred_start: str, pred_end: str, targets: list[str],
+              preserve_bad_flags: bool = True, synthetic_ratio: float = None):
+    """
+    Run complete training and prediction cycle with optional data augmentation.
+    
+    Parameters
+    ----------
+    train_start : str
+        Training period start date (YYYY-MM-DD HH:MM:SS)
+    train_end : str
+        Training period end date (YYYY-MM-DD HH:MM:SS)
+    pred_start : str
+        Prediction period start date (YYYY-MM-DD HH:MM:SS)
+    pred_end : str
+        Prediction period end date (YYYY-MM-DD HH:MM:SS)
+    targets : list[str]
+        List of target columns (e.g., ['Flag_GHI', 'Flag_DNI', 'Flag_DHI'])
+    preserve_bad_flags : bool, default=True
+        If True, preserves existing bad flags (99) during prediction writeback.
+        If False, overwrites all flags with model predictions.
+    synthetic_ratio : float, optional
+        Ratio of real to synthetic data (e.g., 2.0 = 2:1 real:synthetic).
+        If None, uses SYNTHETIC_DATA_RATIO from config.
+        If 0 or None, no synthetic data augmentation is performed.
+    """
+    # Get all CSV files
+    all_files = sorted(glob.glob(os.path.join(DATA_FOLDER, '**', '*.csv'), recursive=True))
+    
+    # Load all data for training
+    print("Loading data for training...")
+    raw = load_qc_csvs(all_files, header_rows_skip=HEADER_ROWS_SKIP, ts_col=TS_COL)
     if raw.empty:
         print('No files found')
         return
 
+    # Add features
+    print("Engineering features...")
     full = add_features(raw, SITE_CONFIG)
-    # Ensure Timestamp_dt is datetime type before setting as index
     full['Timestamp_dt'] = pd.to_datetime(full['Timestamp_dt'], errors='coerce')
     full.index = full['Timestamp_dt']
     
+    # Extract training data
     train_mask = (full.index >= pd.to_datetime(train_start)) & (full.index <= pd.to_datetime(train_end))
-    pred_mask = (full.index >= pd.to_datetime(pred_start)) & (full.index <= pd.to_datetime(pred_end))
-
     train_df = full[train_mask].copy()
-    pred_df = full[pred_mask].copy()
 
-    if train_df.empty or pred_df.empty:
-        raise RuntimeError('Training or prediction slice empty')
+    if train_df.empty:
+        raise RuntimeError('Training slice is empty')
+    
+    # Data augmentation with synthetic error injection
+    if synthetic_ratio is None:
+        synthetic_ratio = SYNTHETIC_DATA_RATIO
+    
+    if synthetic_ratio > 0:
+        print(f"\n=== Data Augmentation (Ratio {synthetic_ratio}:1 real:synthetic) ===")
+        
+        # Calculate how much synthetic data to generate
+        train_duration_days = (pd.to_datetime(train_end) - pd.to_datetime(train_start)).days
+        synthetic_duration_days = int(train_duration_days / synthetic_ratio)
+        
+        print(f"Training period: {train_duration_days} days")
+        print(f"Synthetic data target: {synthetic_duration_days} days")
+        
+        # Sample continuous months from training data
+        train_start_dt = pd.to_datetime(train_start)
+        train_end_dt = pd.to_datetime(train_end)
+        
+        # Get all available months in training period
+        available_months = []
+        current = train_start_dt.replace(day=1)
+        while current <= train_end_dt:
+            available_months.append(current)
+            current = current + relativedelta(months=1)
+        
+        # Determine how many months we need for synthetic data
+        days_per_month = 30  # Approximate
+        months_needed = max(1, int(synthetic_duration_days / days_per_month))
+        months_needed = min(months_needed, len(available_months))  # Can't sample more than available
+        
+        print(f"Randomly sampling {months_needed} whole month(s) for error injection...")
+        
+        # Randomly select individual months (not necessarily continuous)
+        if months_needed <= len(available_months):
+            sampled_months = random.sample(available_months, months_needed)
+            sampled_months.sort()  # Sort for cleaner output
+            
+            # Extract data for sampled months
+            synthetic_data_list = []
+            for month_start in sampled_months:
+                month_end = month_start + relativedelta(months=1) - pd.Timedelta(seconds=1)
+                month_mask = (train_df.index >= month_start) & (train_df.index <= month_end)
+                month_data = train_df[month_mask].copy()
+                
+                if not month_data.empty:
+                    print(f"  Sampled: {month_start.strftime('%Y-%m')} ({len(month_data)} rows)")
+                    synthetic_data_list.append(month_data)
+            
+            if synthetic_data_list:
+                # Combine sampled months
+                sampled_df = pd.concat(synthetic_data_list, ignore_index=False)
+                print(f"Total sampled data: {len(sampled_df)} rows")
+                
+                # Inject errors using error injection pipeline
+                print("Injecting synthetic errors...")
+                pipeline = ErrorInjectionPipeline()
+                
+                # Process the sampled data - we need to work with the raw dataframe
+                # Extract necessary columns and prepare for error injection
+                synthetic_df = sampled_df.copy()
+                
+                # Run error injection engine directly on the dataframe
+                synthetic_errored, error_metadata = pipeline.engine.inject_errors(synthetic_df)
+                synthetic_flagged = pipeline.engine.flag_bad_data(synthetic_errored, error_metadata)
+                
+                # Re-engineer features for the synthetic data to ensure consistency
+                print("Re-engineering features for synthetic data...")
+                # We need to restore the _source_file and _raw_ts columns if they were lost
+                for col in ['_source_file', '_raw_ts']:
+                    if col in sampled_df.columns and col not in synthetic_flagged.columns:
+                        synthetic_flagged[col] = sampled_df[col].values
+                
+                # Re-add features (some may have been affected by error injection)
+                synthetic_final = add_features(synthetic_flagged, SITE_CONFIG)
+                synthetic_final['Timestamp_dt'] = pd.to_datetime(synthetic_final['Timestamp_dt'], errors='coerce')
+                synthetic_final.index = synthetic_final['Timestamp_dt']
+                
+                # Combine original training data with synthetic data
+                print(f"\nCombining training data:")
+                print(f"  Original: {len(train_df)} rows")
+                print(f"  Synthetic: {len(synthetic_final)} rows")
+                train_df = pd.concat([train_df, synthetic_final], ignore_index=False)
+                print(f"  Combined: {len(train_df)} rows")
+                
+                # Count bad flags in combined data
+                bad_flags_count = 0
+                for t in targets:
+                    if t in train_df.columns:
+                        bad_flags_count += (train_df[t] == 99).sum()
+                print(f"  Total bad flags across all targets: {bad_flags_count}")
+            else:
+                print("Warning: No data sampled for synthetic generation")
+        else:
+            print(f"Warning: Not enough months available for synthetic data generation")
+    else:
+        print("\nSkipping synthetic data augmentation (ratio = 0)")
 
+    # Infer sequence length based on data resolution
+    seq_length = infer_seq_length(train_df, SEQ_WINDOW_MINUTES)
+    print(f"\n[info] Inferred seq_length={seq_length} from data resolution")
+
+    # Train models for each target
     for t in targets:
-        print(f"=== Training and predicting {t} ===")
+        print(f"\n=== Training {t} ===")
         # Use RNN model by default for better time-series sensitivity
-        model = SolarHybridModel(use_rnn=True)
-        # fit model
+        model = SolarHybridModel(use_rnn=True, seq_length=seq_length)
         model.fit(train_df, target_col=t)
 
         # Save the trained model
         model_filename = os.path.join(MODEL_FOLDER, f'model_{t}.pkl')
         model.save_model(model_filename)
-
-        # If the unsupervised detector exists, score pred_df and add IF_Score
-        if getattr(model, 'if_det', None) is not None:
-            try:
-                pred_df['IF_Score'] = model.if_det.decision_function(pred_df[model.common_features].fillna(0.0))
-            except Exception:
-                pred_df['IF_Score'] = 0.0
-
-        # Predict with probabilities
-        flags, probs = model.predict(pred_df, t, do_return_probs=True)
-        prob_col = f"{t}_prob"
-        pred_df[t] = flags
-        pred_df[prob_col] = probs  # 1.0 == GOOD
-
-        # Decide auto-write by thresholding
-        pred_df['AutoWrite'] = False
-        pred_df.loc[pred_df[prob_col] >= HIGH_THRESH, 'AutoWrite'] = True
-        pred_df.loc[pred_df[prob_col] <= LOW_THRESH, 'AutoWrite'] = True
-
-        # Ensure _source_file and _raw_ts exist in pred_df for mapping
-        if '_source_file' not in pred_df.columns or '_raw_ts' not in pred_df.columns:
-            raise RuntimeError('Pred dataframe missing source info')
-
-        # Write back committed flags & probabilities
-        write_back(pred_df[['_source_file', '_raw_ts', t, prob_col, 'AutoWrite']], t)
+        print(f"Model saved to {model_filename}")
+    
+    # Determine prediction files based on date range
+    # Convert date range to month format for file matching
+    pred_start_date = pd.to_datetime(pred_start)
+    pred_end_date = pd.to_datetime(pred_end)
+    
+    pred_files = []
+    for f in all_files:
+        try:
+            basename = os.path.basename(f)
+            # Extract date from filename (assumes format like STW_2025-07_QC.csv)
+            if '_' in basename and '-' in basename:
+                date_part = basename.split('_')[1].split('.')[0]  # e.g., "2025-07"
+                file_date = pd.to_datetime(date_part + '-01')  # First day of month
+                
+                # Include file if it overlaps with prediction period
+                if file_date >= pred_start_date.replace(day=1) and file_date <= pred_end_date:
+                    pred_files.append(f)
+        except Exception:
+            pass
+    
+    if not pred_files:
+        print("\nWarning: No files found for prediction period")
+        return
+    
+    # Run predictions using predict_with_saved_model
+    print(f"\n=== Running predictions on {len(pred_files)} file(s) ===")
+    predict_with_model(
+        file_paths=pred_files,
+        targets=targets,
+        write_back=True,
+        preserve_bad_flags=preserve_bad_flags
+    )
 
 
 # ----------------- Entry point -------------------------------------------
 if __name__ == '__main__':
     TARGETS = ['Flag_GHI', 'Flag_DNI', 'Flag_DHI']
 
-    TRAIN_START = '2025-02-01 00:00:00'
+    TRAIN_START = '2023-01-01 00:00:00'
     TRAIN_END = '2025-06-30 23:59:59'
     PRED_START = '2025-07-01 00:00:00'
-    PRED_END = '2025-07-30 23:59:59'
+    PRED_END = '2025-07-31 23:59:59'
 
+    # Run with default behavior (preserves existing bad flags, uses synthetic augmentation)
     run_cycle(TRAIN_START, TRAIN_END, PRED_START, PRED_END, TARGETS)
+    
+    # To overwrite all flags with model predictions:
+    # run_cycle(TRAIN_START, TRAIN_END, PRED_START, PRED_END, TARGETS, preserve_bad_flags=False)
+    
+    # To disable synthetic data augmentation:
+    # run_cycle(TRAIN_START, TRAIN_END, PRED_START, PRED_END, TARGETS, synthetic_ratio=0)
+    
+    # To use a different augmentation ratio (e.g., 3:1 real:synthetic):
+    # run_cycle(TRAIN_START, TRAIN_END, PRED_START, PRED_END, TARGETS, synthetic_ratio=3.0)

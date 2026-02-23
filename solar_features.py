@@ -83,7 +83,6 @@ Usage
     df_featured = add_features(df_raw, site_cfg)
 
 Author: Solar QC Team
-Last Updated: February 2026
 """
 
 from __future__ import annotations
