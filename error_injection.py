@@ -52,9 +52,9 @@ ERROR_INJECTION_CONFIG = {
     
     'error_functions': {
         'reduce_features': {
-            'reduction_percent': (1, 50),  
+            'reduction_percent': (6, 50),  
             'window_type': ['box', 'gaussian'],  
-            'gaussian_sigma_minutes': 2,  
+            'gaussian_sigma_minutes': 10,  
             'weight': 0.3 # Probability weight of this error being chosen
         },
         'copy_from_day': {
@@ -63,17 +63,17 @@ ERROR_INJECTION_CONFIG = {
         },
         'end_of_day_frost': {
             'dip_percent': (10, 40),  
-            'weight': 0.15 
+            'weight': 0.0 # Set to 0 since we will place these contextually near sunset, not randomly 
         },
         'cleaning_event': {
             'dip_percent': (4, 8),  
             'duration_minutes': 3,  
-            'weight': 0.15
+            'weight': 0.2
         },
         'water_droplet': {
             'spike_percent': (5, 25), # Magnification effect
             'duration_minutes': (1, 5), # Quick evaporation/runoff
-            'weight': 0.1
+            'weight': 0.2
         },
         'broken_tracker': {
             'duration_minutes': (30, 240), # Trackers usually stay broken until fixed
