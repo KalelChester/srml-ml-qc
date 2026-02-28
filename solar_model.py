@@ -834,8 +834,14 @@ class SolarHybridModel:
         train_df = df[df[target_col].notna()].copy()
         if train_df.empty:
             raise RuntimeError(f"No labeled rows for {target_col}")
+        
+        # select ONLY rows with valid GOOD (1, 11) or BAD (99) flags
+        train_df = df[df[target_col].isin([1, 11, 99])].copy()
+        
+        if train_df.empty:
+            raise RuntimeError(f"No valid labeled rows (1, 11, 99) found for {target_col}")
 
-        # labels: 99 -> 0 (BAD), others -> 1 (GOOD)
+        # labels: 99 -> 0 (BAD), 1/11 -> 1 (GOOD)
         y = np.where(train_df[target_col] == 99, 0, 1).astype(int)
 
         # ---------------- build features & RF baseline -----------------
@@ -1060,18 +1066,26 @@ class SolarHybridModel:
                 test_eval = eval_df.iloc[split_idx:]
 
                 def _score_split(split_name, split_df):
-                    y_true = np.where(split_df[target_col] == 99, 0, 1).astype(int)
+                    # Filter the split first so diagnostics only run on valid flags
+                    valid_df = split_df[split_df[target_col].isin([1, 11, 99])]
+                    
+                    if valid_df.empty:
+                        print(f"    [fit] {split_name} metrics skipped: No valid flags found.")
+                        return
+
+                    # 0 = BAD, 1 = GOOD
+                    y_true = np.where(valid_df[target_col] == 99, 0, 1).astype(int)
                     
                     # Try full prediction first; fallback to batch processing if memory fails
                     try:
-                        y_pred_flags = self.predict(split_df, target_col)
+                        y_pred_flags = self.predict(valid_df, target_col)
                     except Exception as mem_error:
                         # Fallback: batch process in chunks for memory efficiency
                         if "allocate" in str(mem_error).lower() or "memory" in str(mem_error).lower():
-                            batch_size = max(1000, len(split_df) // 10)  # ~10 batches
+                            batch_size = max(1000, len(valid_df) // 10)  # ~10 batches
                             y_pred_flags = []
-                            for i in range(0, len(split_df), batch_size):
-                                batch_df = split_df.iloc[i:min(i+batch_size, len(split_df))]
+                            for i in range(0, len(valid_df), batch_size):
+                                batch_df = valid_df.iloc[i:min(i+batch_size, len(valid_df))]
                                 batch_preds = self.predict(batch_df, target_col)
                                 y_pred_flags.extend(batch_preds)
                             y_pred_flags = np.array(y_pred_flags)

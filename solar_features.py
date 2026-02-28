@@ -507,7 +507,12 @@ def add_features(df: pd.DataFrame, site_cfg: Optional[Dict] = None) -> pd.DataFr
 
     # Numeric epoch time (seconds) for numeric models - keep safe if parse failed
     try:
-        temp['Timestamp_Num'] = temp['Timestamp_dt'].astype('int64') / 1e9
+        # Numeric epoch time (seconds) - Explicitly handle NaT
+        temp['Timestamp_Num'] = np.where(
+            temp['Timestamp_dt'].notna(),
+            temp['Timestamp_dt'].view('int64') / 1e9, 
+            0.0
+        )
     except Exception:
         # older pandas may fail on NaT; fallback to zeros
         temp['Timestamp_Num'] = 0.0

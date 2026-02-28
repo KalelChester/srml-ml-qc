@@ -243,12 +243,13 @@ def compare_predictions(results, targets):
         y_true = df[f'{target}_current'].values
         y_pred = df[f'{target}_predicted'].values
         
-        # Remove NaN values
-        valid_idx = ~(np.isnan(y_true) | np.isnan(y_pred))
+        # Remove invalid true flags and NaNs
+        valid_idx = np.isin(y_true, [1, 11, 99]) & ~np.isnan(y_pred)
+        
         y_true_clean = y_true[valid_idx]
         y_pred_clean = y_pred[valid_idx]
         
-        # Normalize flags: 1 and 11 are GOOD, 99 is BAD
+        # Normalize flags: 1 and 11 are GOOD (0), 99 is BAD (1)
         y_true_normalized = (y_true_clean == 99).astype(int)
         y_pred_normalized = (y_pred_clean == 99).astype(int)
         
