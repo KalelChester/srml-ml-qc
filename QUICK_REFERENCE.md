@@ -129,7 +129,7 @@ python prediction_comparison.py --file data/STW_2025/STW_2025-07_QC.csv data/STW
 **Purpose**: Manual review and correction of automated QC flags
 
 **Features**:
-- Time-series visualization (24-hour windows)
+- Time-series visualization
 - Click-drag box selection for bulk editing
 - Multiple x-axis modes (Time/Azimuth/Zenith)
 - Day/month navigation
@@ -157,7 +157,6 @@ python SRML_ManualQC.py path/to/file.csv
 **Color coding**:
 - Red = BAD (99)
 - Green = GOOD (1)
-- Yellow = PROBABLE (intermediate confidence)
 
 **Best practices**:
 - Review model predictions systematically (month by month)
@@ -182,7 +181,7 @@ python SRML_ManualQC.py path/to/file.csv
 - Modular architecture: DataManager, SolarGeometry, ErrorFunctions, ErrorInjectionEngine, OutputHandler
 
 **Error Types**:
-1. **reduce_features**: Reduce all irradiance values by 1-50%
+1. **reduce_features**: Reduce all irradiance values by 6-50%
 2. **copy_from_day**: Copy values from a different day (-30 to -1 days offset)
 3. **end_of_day_frost**: Dip 10-40% at day end (frost/dew formation)
 4. **cleaning_event**: Brief 4-8% dip lasting 3 minutes (panel cleaning)

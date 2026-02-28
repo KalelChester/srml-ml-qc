@@ -121,7 +121,7 @@ class SolarRNN(nn.Module):
        - Produces weighted sum of hidden states
        
     4. Dense Classification Head
-       - 128 → 64 → 32 → 2 fully connected layers
+       - 64 → 32 → 2 fully connected layers
        - ReLU activations throughout
        - Dropout for regularization (training only)
        - Final 2-unit output: logits for [BAD(0), GOOD(1)]
@@ -232,15 +232,9 @@ class SolarRNN(nn.Module):
         # Dropout for regularization
         if training:
             attended = nn.Dropout(rate=self.dropout_rate)(attended, deterministic=False)
-        
+            
         # Dense layers for classification
-        x = nn.Dense(128)(attended)
-        x = nn.relu(x)
-        
-        if training:
-            x = nn.Dropout(rate=self.dropout_rate)(x, deterministic=False)
-        
-        x = nn.Dense(64)(x)
+        x = nn.Dense(64)(attended)
         x = nn.relu(x)
         
         if training:
@@ -265,9 +259,8 @@ class DenseNN(nn.Module):
     Architecture
     ------------
     - Input: Flattened feature vector
-    - Hidden Layer 1: 128 units + ReLU
-    - Hidden Layer 2: 64 units + ReLU
-    - Hidden Layer 3: 32 units + ReLU
+    - Hidden Layer 1: 64 units + ReLU
+    - Hidden Layer 2: 32 units + ReLU
     - Output: 2 logits for [BAD(0), GOOD(1)]
     
     Input Shape
@@ -300,8 +293,6 @@ class DenseNN(nn.Module):
     @nn.compact
     def __call__(self, x, training: bool = False):
         x = x.reshape((x.shape[0], -1))
-        x = nn.Dense(128)(x)
-        x = nn.relu(x)
         x = nn.Dense(64)(x)
         x = nn.relu(x)
         x = nn.Dense(32)(x)
@@ -650,13 +641,11 @@ class SolarHybridModel:
 
         # Feature set (must mirror solar_features.add_features)
         self.common_features = [
-            # 'Timestamp_Num',
             'hour_sin', 'hour_cos',
             'doy_sin', 'doy_cos',
             'SZA', 'CSI',
             'QC_PhysicalFail', 'Temperature',
             'ghi_ratio', 'ghi_diff',
-            # 'CorrFeat_GHI', 'CorrFeat_DNI', 'CorrFeat_DHI', 'elevation',
             'GHI', 'DNI', 'DHI',
             'GHI_Clear', 'DNI_Clear', 'DHI_Clear'
         ]
@@ -680,7 +669,7 @@ class SolarHybridModel:
     def fit(self,
             df: pd.DataFrame,
             target_col: str,
-            epochs: int = 20,
+            epochs: int = 10,
             batch_size: int = 64,
             upsample_min_bad: int = 500,
             synthetic_frac: float = 0.0,

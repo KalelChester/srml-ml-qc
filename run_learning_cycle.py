@@ -134,7 +134,7 @@ HEADER_ROWS_SKIP = 43  # Number of rows to skip when reading (skips rows 0-42, u
 HEADER_ROWS_PRESERVE = 44  # Number of rows to preserve when writing back (rows 0-43 including column names)
 TS_COL = 'YYYY-MM-DD--HH:MM:SS'
 
-SEQ_WINDOW_MINUTES = 180 # Target window in minutes for RNN sequence length (3 hours)
+SEQ_WINDOW_MINUTES = 60 # Target window in minutes for RNN sequence length (3 hours)
 
 # Synthetic data augmentation ratio
 # Ratio of real training data to synthetic error-injected data
