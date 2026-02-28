@@ -1093,10 +1093,12 @@ class SolarHybridModel:
                             raise  # Re-raise if not a memory error
                     
                     y_pred = np.where(y_pred_flags == 99, 0, 1).astype(int)
+                    
                     acc = accuracy_score(y_true, y_pred)
-                    prec = precision_score(y_true, y_pred, zero_division=0)
-                    rec = recall_score(y_true, y_pred, zero_division=0)
-                    f1 = f1_score(y_true, y_pred, zero_division=0)
+                    # EXPLICITLY set pos_label=0 to track BAD data metrics
+                    prec = precision_score(y_true, y_pred, pos_label=0, zero_division=0)
+                    rec = recall_score(y_true, y_pred, pos_label=0, zero_division=0)
+                    f1 = f1_score(y_true, y_pred, pos_label=0, zero_division=0)
                     print(
                         f"    [fit] {split_name} metrics: "
                         f"acc={acc:.4f} prec={prec:.4f} rec={rec:.4f} f1={f1:.4f}"
