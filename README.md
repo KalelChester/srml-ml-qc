@@ -41,19 +41,20 @@ Common columns:
 
 ## Core Workflow
 
-### 1) Train and Predict (One-Step Cycle)
+### 1) Train Models (Read-Only)
 
-run_learning_cycle.py is the primary entry point.
+run_learning_cycle.py is the primary training script.
+
+NOTE: This script does NOT modify any existing data files.
 
 What it does:
-1. Loads CSVs from data/
+1. Loads all CSVs from data/
 2. Builds features via solar_features.add_features
 3. Optionally augments training data with synthetic errors
 4. Trains models for each target flag
 5. Saves models to models/
-6. Runs predictions on a date range and writes flags back to CSVs
 
-Example (edit date ranges in the file first):
+Example (edit date range in the file first):
 
 ```bash
 python run_learning_cycle.py
@@ -62,7 +63,7 @@ python run_learning_cycle.py
 Key configuration knobs:
 - SITE_CONFIG: latitude/longitude/altitude/timezone metadata for solar features
 - SYNTHETIC_DATA_RATIO: real:synthetic ratio for augmentation
-- TRAIN_START/END, PRED_START/END: date ranges for training and prediction
+- TRAIN_START/END: date range for training data
 
 ### 2) Predict Only (Using Saved Models)
 

@@ -7,17 +7,19 @@ Quick reference for all scripts in the Solar QC system, organized by pipeline im
 1. CORE TRAINING & PREDICTION (Primary Pipeline)
 ═══════════════════════════════════════════════════════════════════════════════
 
-## run_learning_cycle.py - Main Orchestrator
+## run_learning_cycle.py - Read-Only Model Training
 
-**Purpose**: End-to-end training and prediction workflow with optional synthetic augmentation
+**Purpose**: Train models with optional synthetic augmentation (READ-ONLY, does NOT modify data files)
 
 **What it does**:
-1. Loads CSVs from data/
+1. Loads all CSVs from data/
 2. Engineers features (temporal, solar geometry, anomalies)
 3. [Optional] Augments training data with synthetic errors
 4. Trains hybrid RNN models (one per target: GHI, DNI, DHI)
 5. Saves models to models/
-6. Runs predictions on specified date range
+
+**IMPORTANT**: Does NOT modify any existing data files or flags. Only trains and saves models.
+Use predict_with_saved_model.py to run predictions on data files.
 
 **Configuration**: NO command-line arguments - edit directly in file before running
 
@@ -25,17 +27,15 @@ Quick reference for all scripts in the Solar QC system, organized by pipeline im
 ```bash
 # 1. Edit dates and config in the file:
 #    - TRAIN_START/TRAIN_END (training period)
-#    - PRED_START/PRED_END (prediction period)
-#    - TARGETS (which flags to predict)
+#    - TARGETS (which flags to train on)
 #    - SYNTHETIC_DATA_RATIO (augmentation level)
 # 2. Run:
 python run_learning_cycle.py
 ```
 
 **Key config knobs** (edit in `__main__` section):
-- `TRAIN_START/END`: Training date range (e.g., '2023-01-01 00:00:00' to '2025-06-30 23:59:59')
-- `PRED_START/END`: Prediction date range (e.g., '2025-07-01 00:00:00' to '2025-07-31 23:59:59')
-- `TARGETS`: Flags to predict (default: `['Flag_GHI', 'Flag_DNI', 'Flag_DHI']`)
+- `TRAIN_START/END`: Training date range (e.g., '2023-01-01 00:00:00' to '2025-12-31 23:59:59')
+- `TARGETS`: Flags to train on (default: `['Flag_GHI', 'Flag_DNI', 'Flag_DHI']`)
 
 **Key config in file body**:
 - `SYNTHETIC_DATA_RATIO`: real:synthetic ratio (2.0 = 2:1, 0 = disabled)
@@ -43,6 +43,8 @@ python run_learning_cycle.py
 
 **Synthetic augmentation**: Randomly samples whole months from training data, injects 
 realistic errors, combines with real data at specified ratio for more robust models.
+
+**Output**: Trained model files saved to models/model_Flag_{GHI|DNI|DHI}.pkl
 
 ─────────────────────────────────────────────────────────────────────────────
 
@@ -510,21 +512,22 @@ COMMON WORKFLOWS
 2. Place data files in data/STW_YYYY/ folders (comprehensive format)
 3. Edit training dates in run_learning_cycle.py
 4. Run: `python run_learning_cycle.py`
-5. Models saved to models/ folder
+5. Models saved to models/ folder (no data files modified)
 
 ## B. Predict New Data
 
-1. Place new CSV files in data/STW_YYYY/ folders
-2. Run: `python predict_with_saved_model.py --start YYYY-MM-DD --end YYYY-MM-DD`
-3. Predictions written back to CSV files (preserves manual flags)
+1. Ensure models exist in models/ folder (run training first if needed)
+2. Place new CSV files (or ensure existing files) in data/STW_YYYY/ folders
+3. Run: `python predict_with_saved_model.py --start YYYY-MM-DD --end YYYY-MM-DD`
+4. Predictions written back to CSV files (preserves manual flags by default)
 
 ## C. Manual Review Cycle
 
-1. Run predictions on data range
+1. Run predictions on data range: `python predict_with_saved_model.py --start YYYY-MM-DD --end YYYY-MM-DD`
 2. Launch GUI: `python SRML_ManualQC.py`
 3. Load file, review flags, make corrections
 4. Auto-saves preserve changes
-5. Optionally retrain with corrected data
+5. Optionally retrain with corrected data: `python run_learning_cycle.py`
 
 ## D. Testing with Synthetic Errors
 

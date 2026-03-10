@@ -2,11 +2,13 @@
 run_learning_cycle.py
 =====================
 
-Training and Prediction Orchestration with Synthetic Data Augmentation
+Read-Only Training Orchestration with Synthetic Data Augmentation
 
-This script orchestrates the complete machine learning workflow for solar irradiance
-quality control, from data loading through model training to prediction, with optional
+This script orchestrates the machine learning training workflow for solar irradiance
+quality control, from data loading through model training, with optional
 synthetic data augmentation using error injection.
+
+NOTE: This script is READ-ONLY and does not modify any existing data files.
 
 Workflow Overview
 -----------------
@@ -19,19 +21,16 @@ Workflow Overview
    - Combine synthetic data with original training data
 5. Train hybrid RNN models for each target (GHI, DNI, DHI) on augmented data
 6. Save trained models to models/ folder
-7. Run predictions on prediction period using predict_with_saved_model
 
 Key Features
 ------------
+- **Read-Only Operation**: Does NOT modify any existing data files or flags
 - **Synthetic Data Augmentation**: Configurable ratio (default 2:1 real:synthetic)
   - Samples whole months from training data (e.g., Feb, Apr, Jun from Jan-Jun)
   - Injects realistic errors to create more bad data examples
   - Increases model robustness to various failure modes
 - **RNN Time-Series Models**: Uses fixed-length sequences for temporal awareness
-- **Model Persistence**: Saves trained models for reuse without retraining
-- **Automatic Prediction**: Calls predict_with_saved_model after training
-- **Flag Preservation**: By default, preserves existing bad flags (99) during predictions
-- **Header Preservation**: Maintains original CSV header rows (43 metadata + 1 column names)
+- **Model Persistence**: Saves trained models to models/ folder for later use
 
 Configuration
 -------------
@@ -50,27 +49,25 @@ SYNTHETIC_DATA_RATIO:
     - Set to 0 to disable augmentation
     - Higher ratio = less synthetic data (3.0 = 3:1 means only 1/3 as much synthetic)
 
-TRAIN/PRED Dates:
-    - Define training period and prediction period
-    - Recommendation: 3-4 months training, 1-2 months prediction
+TRAIN Dates:
+    - Define training period
+    - Recommendation: 3-4 months minimum
     - Augmentation samples from training period only
 
 Usage
 -----
 1. Update SITE_CONFIG in config.py with your location details
 2. Adjust SYNTHETIC_DATA_RATIO for desired augmentation level
-3. Adjust date ranges for training/prediction periods in main block
+3. Adjust date range for training period in main block
 4. Verify DATA_FOLDER contains CSV files with proper structure
 5. Run: python run_learning_cycle.py
 6. Check models/ folder for saved models
-7. Check updated CSVs for predictions with Flag_* and Flag_*_prob columns
 
 Output Files
 ------------
 - models/model_Flag_GHI.pkl: Trained GHI quality model
 - models/model_Flag_DNI.pkl: Trained DNI quality model
 - models/model_Flag_DHI.pkl: Trained DHI quality model
-- Updated source CSVs: With Flag_* and Flag_*_prob columns
 
 Synthetic Data Augmentation Details
 ------------------------------------
@@ -98,26 +95,47 @@ Notes
 - Timestamps assumed to be in correct local time (no conversion applied)
 - Missing columns handled gracefully with safe defaults
 - Models train on RNN architecture by default
-- Predictions preserve existing bad flags (99) by default
-- Use preserve_bad_flags=False in run_cycle() to overwrite all flags
 - Synthetic augmentation improves model performance on rare failure modes
 - Augmentation ratio can be overridden per run_cycle() call
+- Use predict_with_saved_model.py to run predictions with trained models
 """
 
 import os
 import glob
+import sys
 import pandas as pd
 import numpy as np
 import random
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
+from pathlib import Path
 
 from solar_features import add_features
 from solar_model import SolarHybridModel
-from predict_with_saved_model import predict_with_model
 from error_injection import ErrorInjectionPipeline
 from config import SITE_CONFIG
 from io_utils import load_qc_csvs
+
+
+# ---------------- LOGGING UTILITIES ----------------
+class TeeLogger:
+    """Redirect print statements to both console and log file."""
+    def __init__(self, log_file_path):
+        self.log_file = open(log_file_path, 'w', encoding='utf-8')
+        self.stdout = sys.stdout
+        
+    def write(self, message):
+        self.stdout.write(message)
+        self.log_file.write(message)
+        self.log_file.flush()  # Ensure immediate write
+        
+    def flush(self):
+        self.stdout.flush()
+        self.log_file.flush()
+        
+    def close(self):
+        sys.stdout = self.stdout
+        self.log_file.close()
 
 
 # ---------------- HELPER FUNCTIONS ----------------
@@ -130,6 +148,7 @@ def print_with_timestamp(*args, **kwargs):
 # ---------------- CONFIG ----------------
 DATA_FOLDER = 'data'
 MODEL_FOLDER = 'models'  # Folder to save trained models
+LOG_FOLDER = 'log_files'  # Folder to save training logs
 HEADER_ROWS_SKIP = 43  # Number of rows to skip when reading (skips rows 0-42, uses row 43 as column names)
 HEADER_ROWS_PRESERVE = 44  # Number of rows to preserve when writing back (rows 0-43 including column names)
 TS_COL = 'YYYY-MM-DD--HH:MM:SS'
@@ -168,10 +187,12 @@ def infer_seq_length(df: pd.DataFrame, window_minutes: int) -> int:
 
 # ---------------- Main cycle ----------------------------------------------
 
-def run_cycle(train_start: str, train_end: str, pred_start: str, pred_end: str, targets: list[str],
-              preserve_bad_flags: bool = True, synthetic_ratio: float = None, num_test_files: int = 2):
+def run_cycle(train_start: str, train_end: str, targets: list[str],
+              synthetic_ratio: float = 2.0, enable_logging: bool = True):
     """
-    Run complete training and prediction cycle with optional data augmentation.
+    Run read-only training cycle with optional data augmentation.
+    
+    NOTE: This function does NOT modify any existing data files.
     
     Parameters
     ----------
@@ -179,46 +200,42 @@ def run_cycle(train_start: str, train_end: str, pred_start: str, pred_end: str, 
         Training period start date (YYYY-MM-DD HH:MM:SS)
     train_end : str
         Training period end date (YYYY-MM-DD HH:MM:SS)
-    pred_start : str
-        Prediction period start date (YYYY-MM-DD HH:MM:SS)
-    pred_end : str
-        Prediction period end date (YYYY-MM-DD HH:MM:SS)
     targets : list[str]
         List of target columns (e.g., ['Flag_GHI', 'Flag_DNI', 'Flag_DHI'])
-    preserve_bad_flags : bool, default=True
-        If True, preserves existing bad flags (99) during prediction writeback.
-        If False, overwrites all flags with model predictions.
     synthetic_ratio : float, optional
         Ratio of real to synthetic data (e.g., 2.0 = 2:1 real:synthetic).
         If None, uses SYNTHETIC_DATA_RATIO from config.
         If 0 or None, no synthetic data augmentation is performed.
-    num_test_files : int, default=2
-        Number of monthly files to randomly select for testing.
-        These files are excluded from training and used for prediction/validation.
+    enable_logging : bool, default=True
+        If True, writes all output to a timestamped log file in log_files/
     """
+    # Setup logging
+    logger = None
+    if enable_logging:
+        Path(LOG_FOLDER).mkdir(exist_ok=True)
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        log_file = Path(LOG_FOLDER) / f'run_learning_cycle_{timestamp}.txt'
+        logger = TeeLogger(log_file)
+        sys.stdout = logger
+        print_with_timestamp(f"Log file created: {log_file}")
+        print_with_timestamp(f"{'='*70}")
+        print_with_timestamp(f"RUN LEARNING CYCLE - READ-ONLY TRAINING LOG")
+        print_with_timestamp(f"{'='*70}")
+        print_with_timestamp(f"Training period: {train_start} to {train_end}")
+        print_with_timestamp(f"Targets: {', '.join(targets)}")
+        print_with_timestamp(f"Synthetic ratio: {synthetic_ratio if synthetic_ratio else 'disabled'}")
+        print_with_timestamp(f"Mode: READ-ONLY (no data files will be modified)")
+        print_with_timestamp(f"{'='*70}\n")
+    
     # Get all CSV files
     all_files = sorted(glob.glob(os.path.join(DATA_FOLDER, '**', '*.csv'), recursive=True))
     
-    # Randomly select test files
-    if len(all_files) > num_test_files:
-        random.seed(42)  # For reproducibility
-        test_files = random.sample(all_files, num_test_files)
-        train_files = [f for f in all_files if f not in test_files]
-        print_with_timestamp(f"\n=== File Split (Random Selection) ===")
-        print_with_timestamp(f"Total files: {len(all_files)}")
-        print_with_timestamp(f"Training files: {len(train_files)}")
-        print_with_timestamp(f"Test files: {len(test_files)}")
-        print_with_timestamp(f"Test files selected:")
-        for tf in sorted(test_files):
-            print_with_timestamp(f"  - {os.path.basename(tf)}")
-    else:
-        print_with_timestamp(f"Warning: Only {len(all_files)} files available, need at least {num_test_files + 1} for train/test split")
-        train_files = all_files
-        test_files = []
+    print_with_timestamp(f"\n=== Loading Data ===")
+    print_with_timestamp(f"Total files found: {len(all_files)}")
     
     # Load training data
     print_with_timestamp("\nLoading data for training...")
-    raw = load_qc_csvs(train_files, header_rows_skip=HEADER_ROWS_SKIP, ts_col=TS_COL)
+    raw = load_qc_csvs(all_files, header_rows_skip=HEADER_ROWS_SKIP, ts_col=TS_COL)
     if raw.empty:
         print_with_timestamp('No training files found')
         return
@@ -349,23 +366,16 @@ def run_cycle(train_start: str, train_end: str, pred_start: str, pred_end: str, 
         model.save_model(model_filename)
         print_with_timestamp(f"Model saved to {model_filename}")
     
-    # Use the randomly selected test files for prediction
-    if not test_files:
-        print_with_timestamp("\nWarning: No test files available for prediction")
-        return
-    
-    pred_files = test_files
-    
-    # Run predictions using predict_with_saved_model
-    print_with_timestamp(f"\n=== Running predictions on {len(pred_files)} test file(s) ===")
-    for pf in sorted(pred_files):
-        print_with_timestamp(f"  - {os.path.basename(pf)}")
-    predict_with_model(
-        file_paths=pred_files,
-        targets=targets,
-        write_back=True,
-        preserve_bad_flags=preserve_bad_flags
-    )
+    print_with_timestamp(f"\n{'='*70}")
+    print_with_timestamp("Training cycle complete!")
+    print_with_timestamp("NOTE: No data files were modified (read-only mode)")
+    print_with_timestamp(f"To run predictions, use: predict_with_saved_model.py")
+    print_with_timestamp(f"{'='*70}")
+        
+    # Close logger and restore stdout
+    if logger is not None:
+        logger.close()
+        print(f"\nLog saved to: {log_file}")
 
 
 # ----------------- Entry point -------------------------------------------
@@ -373,21 +383,13 @@ if __name__ == '__main__':
     TARGETS = ['Flag_GHI', 'Flag_DNI', 'Flag_DHI']
 
     TRAIN_START = '2023-01-01 00:00:00'
-    TRAIN_END = '2025-06-30 23:59:59'
-    PRED_START = '2025-07-01 00:00:00'
-    PRED_END = '2025-07-31 23:59:59'
+    TRAIN_END = '2025-12-31 23:59:59'
 
-    # Run with default behavior (preserves existing bad flags, uses synthetic augmentation, 2 random test files)
-    run_cycle(TRAIN_START, TRAIN_END, PRED_START, PRED_END, TARGETS)
-    
-    # To overwrite all flags with model predictions:
-    # run_cycle(TRAIN_START, TRAIN_END, PRED_START, PRED_END, TARGETS, preserve_bad_flags=False)
+    # Run with default behavior (uses synthetic augmentation at 2:1 ratio)
+    run_cycle(TRAIN_START, TRAIN_END, TARGETS)
     
     # To disable synthetic data augmentation:
-    # run_cycle(TRAIN_START, TRAIN_END, PRED_START, PRED_END, TARGETS, synthetic_ratio=0)
+    # run_cycle(TRAIN_START, TRAIN_END, TARGETS, synthetic_ratio=0)
     
     # To use a different augmentation ratio (e.g., 3:1 real:synthetic):
-    # run_cycle(TRAIN_START, TRAIN_END, PRED_START, PRED_END, TARGETS, synthetic_ratio=3.0)
-    
-    # To use more test files (e.g., 4 files):
-    # run_cycle(TRAIN_START, TRAIN_END, PRED_START, PRED_END, TARGETS, num_test_files=4)
+    # run_cycle(TRAIN_START, TRAIN_END, TARGETS, synthetic_ratio=3.0)

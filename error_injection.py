@@ -77,7 +77,7 @@ ERROR_INJECTION_CONFIG = {
         },
         'broken_tracker': {
             'duration_minutes': (30, 240), # Trackers usually stay broken until fixed
-            'weight': 0.1
+            'weight': 0.0 # Not the model's job right now
         }
     }
 }
