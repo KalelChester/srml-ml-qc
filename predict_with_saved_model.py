@@ -31,7 +31,7 @@ import numpy as np
 
 from solar_features import add_features
 from solar_model import SolarHybridModel
-from config import SITE_CONFIG
+from config import SITE_CONFIG, PREDICTION_THRESHOLDS, TARGET_RF_BLEND_WEIGHTS
 from io_utils import load_qc_csvs
 
 
@@ -41,13 +41,6 @@ MODEL_FOLDER = 'models'
 HEADER_ROWS_SKIP = 43
 HEADER_ROWS_PRESERVE = 44
 TS_COL = 'YYYY-MM-DD--HH:MM:SS'
-
-# Confidence thresholds (match training settings)
-HIGH_THRESH = 0.51
-LOW_THRESH = 0.49
-
-
-
 
 def write_predictions(df_preds: pd.DataFrame, target_col: str, preserve_bad_flags: bool = True):
     """Write predictions back to source files.
@@ -185,7 +178,17 @@ def predict_with_model(file_paths: list, targets: list, write_back: bool = True,
         
         # Make predictions
         print(f"Predicting {len(pred_df)} samples...")
-        flags, probs = model.predict(pred_df, target, do_return_probs=True)
+        decision_threshold = float(PREDICTION_THRESHOLDS.get(target, 0.5))
+        rf_blend_weight = float(TARGET_RF_BLEND_WEIGHTS.get(target, 0.0))
+        print(f"Using decision threshold for {target}: {decision_threshold:.3f}")
+        print(f"Using RF blend weight for {target}: {rf_blend_weight:.3f}")
+        flags, probs = model.predict(
+            pred_df,
+            target,
+            do_return_probs=True,
+            decision_threshold=decision_threshold,
+            rf_blend_weight=rf_blend_weight,
+        )
         
         # Store results
         prob_col = f"{target}_prob"

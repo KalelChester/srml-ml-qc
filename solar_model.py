@@ -646,6 +646,9 @@ class SolarHybridModel:
             'SZA', 'CSI',
             'QC_PhysicalFail', 'Temperature',
             'ghi_ratio', 'ghi_diff',
+            'dni_clear_ratio', 'dhi_clear_ratio',
+            'dni_ghi_ratio', 'dhi_ghi_ratio',
+            'closure_rel_err', 'beam_horizontal_consistency',
             'GHI', 'DNI', 'DHI',
             'GHI_Clear', 'DNI_Clear', 'DHI_Clear'
         ]
@@ -673,7 +676,10 @@ class SolarHybridModel:
             batch_size: int = 64,
             upsample_min_bad: int = 500,
             synthetic_frac: float = 0.0,
-            eval_split: float = 0.2):
+            eval_split: float = 0.2,
+            class_weight_multipliers: Optional[dict[int, float]] = None,
+            max_bad_fraction: float = 0.10,
+            max_bad_weight: float = 3.0):
         """
         Train the complete hybrid model: RF + IsolationForest + NN (RNN or Dense).
         
@@ -767,7 +773,7 @@ class SolarHybridModel:
         
           9. **Sequence Creation (RNN Mode Only)**
               - Transform (n_samples, features) -> (n_sequences, seq_length, features)
-              - Sliding windows with stride=5
+              - Sliding windows with stride=1 (consistent with inference)
            - Generate new labels at last time step of each sequence
         
         10. **NN Training**
@@ -844,10 +850,65 @@ class SolarHybridModel:
         # labels: 99 -> 0 (BAD), 1/11 -> 1 (GOOD)
         y = np.where(train_df[target_col] == 99, 0, 1).astype(int)
 
+        # Conservative guardrail: cap BAD prevalence in fit data to reduce
+        # tendency to over-predict BAD on mostly-good operational data.
+        bad_idx = np.where(y == 0)[0]
+        good_idx = np.where(y == 1)[0]
+        n_bad = int(len(bad_idx))
+        n_good = int(len(good_idx))
+        if n_bad > 0 and n_good > 0:
+            current_bad_frac = n_bad / float(n_bad + n_good)
+            target_bad_frac = float(np.clip(max_bad_fraction, 0.005, 0.5))
+            if current_bad_frac > target_bad_frac:
+                max_bad_keep = int((target_bad_frac / (1.0 - target_bad_frac)) * n_good)
+                max_bad_keep = max(1, max_bad_keep)
+                if max_bad_keep < n_bad:
+                    keep_bad_idx = np.random.choice(bad_idx, size=max_bad_keep, replace=False)
+                    keep_idx = np.concatenate([good_idx, keep_bad_idx])
+                    np.random.shuffle(keep_idx)
+                    train_df = train_df.iloc[keep_idx].copy()
+                    y = np.where(train_df[target_col] == 99, 0, 1).astype(int)
+                    print(
+                        f"    [fit] Capped BAD prevalence for {target_col}: "
+                        f"{current_bad_frac:.4f} -> {float((y==0).sum())/len(y):.4f} "
+                        f"(max_bad_fraction={target_bad_frac:.3f})"
+                    )
+
+        required_sensor_cols = ['GHI', 'DNI', 'DHI']
+        missing_sensor_cols = [c for c in required_sensor_cols if c not in train_df.columns]
+        if missing_sensor_cols:
+            raise RuntimeError(
+                f"Missing required sensor column(s) for training {target_col}: {missing_sensor_cols}"
+            )
+
+        # Build a unified class-weight map used consistently by RF and NN.
+        classes_raw, raw_w = np.unique(y, return_counts=True)
+        # Convert counts -> sklearn balanced weight formula.
+        raw_weight_map = {}
+        if len(classes_raw) > 0:
+            balanced_w = compute_class_weight(class_weight='balanced', classes=classes_raw, y=y)
+            for cls, w in zip(classes_raw, balanced_w):
+                raw_weight_map[int(cls)] = float(w)
+
+        bad_mult = float(class_weight_multipliers.get(0, 1.0)) if class_weight_multipliers else 1.0
+        good_mult = float(class_weight_multipliers.get(1, 1.0)) if class_weight_multipliers else 1.0
+
+        effective_weight_map = {
+            0: raw_weight_map.get(0, 1.0) * bad_mult,
+            1: raw_weight_map.get(1, 1.0) * good_mult,
+        }
+
+        # Normalize so GOOD class is 1.0 (when present) for stable interpretation.
+        good_ref = effective_weight_map[1] if effective_weight_map[1] > 0 else 1.0
+        bad_weight_cap = float(np.clip(max_bad_weight, 0.5, 20.0))
+        effective_weight_map[0] = float(np.clip(effective_weight_map[0] / good_ref, 0.1, bad_weight_cap))
+        effective_weight_map[1] = 1.0
+
         # ---------------- build features & RF baseline -----------------
         X = self._build_X(train_df)
         print(f"    [fit] Training base RF on {len(X)} rows (target={target_col})")
-        self.rf.fit(X, y)
+        rf_sample_weight = np.array([effective_weight_map[int(lbl)] for lbl in y], dtype=float)
+        self.rf.fit(X, y, sample_weight=rf_sample_weight)
 
         def _rf_prob_from_model(model, features):
             proba = model.predict_proba(features)
@@ -969,25 +1030,42 @@ class SolarHybridModel:
         # ---------------- scaling --------------------------------------------
         X_scaled = self.scaler.fit_transform(X_stack)
 
-        # ---------------- compute class weights (normalized & clipped) -------
+        # ---------------- compute class weights (consistent with RF) ----------
         classes_present = np.unique(y_arr)
         raw_weights = compute_class_weight(class_weight='balanced', classes=classes_present, y=y_arr)
-        # normalize to mean 1.0 to keep loss magnitude stable
-        normed = raw_weights / float(np.mean(raw_weights))
-        # clip excessive weights to avoid instability
-        clipped = np.clip(normed, 1.0, 10.0)
+        raw_present_map = {int(cls): float(w) for cls, w in zip(classes_present, raw_weights)}
+
+        effective_present_map = {
+            0: raw_present_map.get(0, 1.0) * bad_mult,
+            1: raw_present_map.get(1, 1.0) * good_mult,
+        }
+        good_ref_present = effective_present_map[1] if effective_present_map[1] > 0 else 1.0
+        bad_weight_cap = float(np.clip(max_bad_weight, 0.5, 20.0))
+        effective_present_map[0] = float(np.clip(effective_present_map[0] / good_ref_present, 0.1, bad_weight_cap))
+        effective_present_map[1] = 1.0
+
+        clipped = np.array([
+            effective_present_map.get(int(cls), 1.0)
+            for cls in classes_present
+        ], dtype=float)
         class_weights = jnp.ones(2)
         for cls, w in zip(classes_present, clipped):
             class_weights = class_weights.at[int(cls)].set(float(w))
 
+        print(
+            f"    [fit] applied class weight multipliers: "
+            f"BAD(x{bad_mult:.3f}) GOOD(x{good_mult:.3f}), "
+            f"max_bad_weight={bad_weight_cap:.3f}, max_bad_fraction={float(np.clip(max_bad_fraction, 0.005, 0.5)):.3f}"
+        )
+
         print(f"    [fit] class counts bad={int((y_arr==0).sum())} good={int((y_arr==1).sum())}")
-        print(f"    [fit] raw_weights={raw_weights}, normed={normed}, clipped={clipped}")
+        print(f"    [fit] raw_weights={raw_weights}, clipped={clipped}")
         print(f"    [fit] used NN class_weights (BAD=0,GOOD=1)={class_weights}")
 
         # -------- Prepare data for NN (RNN vs Dense) --------
         if self.use_rnn:
             print(f"    [fit] Preparing sequences for RNN (seq_length={self.seq_length})...")
-            X_seq, y_seq = create_sequences(X_scaled, y_arr, seq_length=self.seq_length, stride=5)
+            X_seq, y_seq = create_sequences(X_scaled, y_arr, seq_length=self.seq_length, stride=1)
             print(f"    [fit] RNN sequences: {X_seq.shape}")
             X_nn = X_seq.astype('float32')
             y_nn = y_seq.astype('int32')
@@ -1123,7 +1201,12 @@ class SolarHybridModel:
         # they are already attributes of self
 
     # ---------------- predict --------------------------------------------
-    def predict(self, df: pd.DataFrame, target_col: str, do_return_probs: bool = False):
+    def predict(self,
+                df: pd.DataFrame,
+                target_col: str,
+                do_return_probs: bool = False,
+                decision_threshold: float = 0.5,
+                rf_blend_weight: float = 0.0):
         """
         Predict quality flags for new data using hybrid ensemble model.
         
@@ -1285,6 +1368,13 @@ class SolarHybridModel:
         #  - We do NOT call _build_X() here because that function may evolve
         #    to include NN-only or diagnostic features.
         #  - This explicit construction prevents silent feature drift.
+        required_sensor_cols = ['GHI', 'DNI', 'DHI']
+        missing_sensor_cols = [c for c in required_sensor_cols if c not in df.columns]
+        if missing_sensor_cols:
+            raise RuntimeError(
+                f"Missing required sensor column(s) for prediction {target_col}: {missing_sensor_cols}"
+            )
+
         X_rf = pd.DataFrame(
             {c: (df[c] if c in df.columns else 0.0) for c in self.common_features},
             index=df.index
@@ -1376,8 +1466,13 @@ class SolarHybridModel:
             # Softmax to obtain probabilities
             probs_good = np.array(jax.nn.softmax(logits, axis=1)[:, 1])
 
+        # Optional no-retrain blend with RF probability for conservative behavior control.
+        rf_w = float(np.clip(rf_blend_weight, 0.0, 1.0))
+        probs_final = (1.0 - rf_w) * probs_good + rf_w * rf_prob
+
         # Binary decision (0 = BAD, 1 = GOOD)
-        preds = (probs_good >= 0.5).astype(int)
+        threshold = float(np.clip(decision_threshold, 0.01, 0.99))
+        preds = (probs_final >= threshold).astype(int)
 
         # Map to project convention: 99 = BAD, 1 = GOOD
         flags = np.where(preds == 1, 1, 99)
@@ -1386,7 +1481,7 @@ class SolarHybridModel:
         # 6. Return
         # ------------------------------------------------------------------
         if do_return_probs:
-            return flags, probs_good
+            return flags, probs_final
 
         return flags
 

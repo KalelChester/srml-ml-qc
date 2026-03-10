@@ -2,7 +2,7 @@
 prediction_comparison.py
 ========================
 
-Load a random selection of data files, make predictions without modifying them,
+Load a random selection of 2026 holdout files, make predictions without modifying them,
 and compare prediction accuracy against current flags for GHI, DNI, and DHI.
 
 Usage:
@@ -15,9 +15,9 @@ Usage:
     # Predict on all files
     python prediction_comparison.py -1
     
-    # Predict on specific file(s)
-    python prediction_comparison.py --file data/STW_2025/STW_2025-07_QC.csv
-    python prediction_comparison.py --file data/STW_2025/STW_2025-07_QC.csv data/STW_2025/STW_2025-08_QC.csv
+    # Predict on specific 2026 file(s)
+    python prediction_comparison.py --file data/STW_2026/STW_2026-01_QC.csv
+    python prediction_comparison.py --file data/STW_2026/STW_2026-01_QC.csv data/STW_2026/STW_2026-02_QC.csv
 """
 
 import os
@@ -32,7 +32,7 @@ from pathlib import Path
 
 from solar_features import add_features
 from solar_model import SolarHybridModel
-from config import SITE_CONFIG
+from config import SITE_CONFIG, PREDICTION_THRESHOLDS, TARGET_RF_BLEND_WEIGHTS
 from io_utils import load_qc_csvs
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 
@@ -46,14 +46,29 @@ LOG_FOLDER = 'log_files'
 HEADER_ROWS_SKIP = 43
 TS_COL = 'YYYY-MM-DD--HH:MM:SS'
 TARGETS = ['Flag_GHI', 'Flag_DNI', 'Flag_DHI']
+EVAL_YEAR_FOLDER = 'STW_2026'
 
 
 def get_all_data_files():
-    """Get all CSV files from data folder (excluding injected_error folder)."""
-    all_files = sorted(glob.glob(os.path.join(DATA_FOLDER, '**', '*.csv'), recursive=True))
-    # Exclude files in the injected_error folder
+    """Get all CSV files from the 2026 holdout folder (excluding injected_error)."""
+    all_files = sorted(glob.glob(os.path.join(DATA_FOLDER, EVAL_YEAR_FOLDER, '*.csv')))
     all_files = [f for f in all_files if 'injected_error' not in f]
     return all_files
+
+
+def filter_eval_files(file_paths):
+    """Keep only 2026 holdout files for performance evaluation."""
+    filtered = []
+    for fp in file_paths:
+        norm_fp = os.path.normpath(fp).replace('\\', '/')
+        if f"/{EVAL_YEAR_FOLDER}/" in f"/{norm_fp}/":
+            filtered.append(fp)
+    skipped = [fp for fp in file_paths if fp not in filtered]
+    if skipped:
+        print(f"Skipping {len(skipped)} file(s) outside {EVAL_YEAR_FOLDER} (trained years are excluded):")
+        for fp in skipped:
+            print(f"  - {fp}")
+    return filtered
 
 
 def select_random_files(num_files):
@@ -152,7 +167,17 @@ def load_and_predict(file_paths, targets):
         
         # Make predictions
         print(f"Predicting {len(pred_df)} samples...")
-        flags, probs = model.predict(pred_df, target, do_return_probs=True)
+        decision_threshold = float(PREDICTION_THRESHOLDS.get(target, 0.5))
+        rf_blend_weight = float(TARGET_RF_BLEND_WEIGHTS.get(target, 0.0))
+        print(f"Using decision threshold for {target}: {decision_threshold:.3f}")
+        print(f"Using RF blend weight for {target}: {rf_blend_weight:.3f}")
+        flags, probs = model.predict(
+            pred_df,
+            target,
+            do_return_probs=True,
+            decision_threshold=decision_threshold,
+            rf_blend_weight=rf_blend_weight,
+        )
         
         # Store results with both predictions and current flags
         pred_df[f'{target}_predicted'] = flags
@@ -417,7 +442,7 @@ Examples:
     # Determine which files to use
     if args.file:
         # Use specified files
-        file_paths = args.file
+        file_paths = filter_eval_files(args.file)
     else:
         # Use random selection
         num_files = args.num_files if args.num_files is not None else 5
@@ -432,6 +457,7 @@ Examples:
         sys.exit(1)
     
     print(f"\n{'='*70}")
+    print(f"Evaluation source restricted to holdout folder: {EVAL_YEAR_FOLDER}")
     print(f"Selected {len(file_paths)} file(s) for prediction comparison")
     print(f"{'='*70}")
     for fp in file_paths:
@@ -457,9 +483,9 @@ Examples:
     
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     log_file = log_dir / f'prediction_comparison_{timestamp}.txt'
-    
     log_to_file(comparison, file_paths, str(log_file))
     print(f"Log file saved to: {log_file}")
+    print("ROC plotting is disabled in this script. Use model_vs_manual_exploration.ipynb for ROC curves.")
 
 
 if __name__ == '__main__':

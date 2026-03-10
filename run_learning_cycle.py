@@ -113,7 +113,7 @@ from pathlib import Path
 from solar_features import add_features
 from solar_model import SolarHybridModel
 from error_injection import ErrorInjectionPipeline
-from config import SITE_CONFIG
+from config import SITE_CONFIG, TARGET_CLASS_WEIGHT_MULTIPLIERS, TARGET_FIT_PARAMS
 from io_utils import load_qc_csvs
 
 
@@ -153,13 +153,15 @@ HEADER_ROWS_SKIP = 43  # Number of rows to skip when reading (skips rows 0-42, u
 HEADER_ROWS_PRESERVE = 44  # Number of rows to preserve when writing back (rows 0-43 including column names)
 TS_COL = 'YYYY-MM-DD--HH:MM:SS'
 
-SEQ_WINDOW_MINUTES = 60 # Target window in minutes for RNN sequence length (3 hours)
+SEQ_WINDOW_MINUTES = 60 # Target window in minutes for RNN sequence length (1 hour)
 
 # Synthetic data augmentation ratio
 # Ratio of real training data to synthetic error-injected data
 # Default 2:1 means if training on 6 months, sample 3 months for error injection
 # Total training data becomes 9 months (6 real + 3 synthetic)
 SYNTHETIC_DATA_RATIO = 2.0  # real:synthetic (e.g., 2.0 = 2:1, 3.0 = 3:1, etc.)
+MIN_ROWS_PER_SYNTH_MONTH = 1000  # Guardrail to skip clearly incomplete/corrupt months
+SYNTHETIC_SAMPLING_SEED = 42  # Deterministic month sampling across runs
 
 
 def infer_seq_length(df: pd.DataFrame, window_minutes: int) -> int:
@@ -259,6 +261,7 @@ def run_cycle(train_start: str, train_end: str, targets: list[str],
     
     if synthetic_ratio > 0:
         print_with_timestamp(f"\n=== Data Augmentation (Ratio {synthetic_ratio}:1 real:synthetic) ===")
+        random.seed(SYNTHETIC_SAMPLING_SEED)
         
         # Calculate how much synthetic data to generate
         train_duration_days = (pd.to_datetime(train_end) - pd.to_datetime(train_start)).days
@@ -271,12 +274,30 @@ def run_cycle(train_start: str, train_end: str, targets: list[str],
         train_start_dt = pd.to_datetime(train_start)
         train_end_dt = pd.to_datetime(train_end)
         
-        # Get all available months in training period
+        # Build month candidates and drop clearly incomplete months.
+        # This prevents pathological samples (e.g., months with 1 row) from skewing augmentation.
         available_months = []
+        skipped_months = []
         current = train_start_dt.replace(day=1)
         while current <= train_end_dt:
-            available_months.append(current)
+            month_end = current + relativedelta(months=1) - pd.Timedelta(seconds=1)
+            month_mask = (train_df.index >= current) & (train_df.index <= month_end)
+            month_rows = int(month_mask.sum())
+            if month_rows >= MIN_ROWS_PER_SYNTH_MONTH:
+                available_months.append(current)
+            elif month_rows > 0:
+                skipped_months.append((current, month_rows))
             current = current + relativedelta(months=1)
+
+        if skipped_months:
+            print_with_timestamp(
+                f"Skipping {len(skipped_months)} underpopulated month(s) "
+                f"(<{MIN_ROWS_PER_SYNTH_MONTH} rows) from synthetic sampling."
+            )
+            for month_start, month_rows in skipped_months[:5]:
+                print_with_timestamp(
+                    f"  Skipped: {month_start.strftime('%Y-%m')} ({month_rows} rows)"
+                )
         
         # Determine how many months we need for synthetic data
         days_per_month = 30  # Approximate
@@ -359,7 +380,38 @@ def run_cycle(train_start: str, train_end: str, targets: list[str],
         print_with_timestamp(f"\n=== Training {t} ===")
         # Use RNN model by default for better time-series sensitivity
         model = SolarHybridModel(use_rnn=True, seq_length=seq_length)
-        model.fit(train_df, target_col=t)
+        multipliers_cfg = TARGET_CLASS_WEIGHT_MULTIPLIERS.get(t, {'bad': 1.0, 'good': 1.0})
+        class_weight_multipliers = {
+            0: float(multipliers_cfg.get('bad', 1.0)),
+            1: float(multipliers_cfg.get('good', 1.0)),
+        }
+        print_with_timestamp(
+            f"Applying class weight multipliers for {t}: "
+            f"BAD x{class_weight_multipliers[0]:.3f}, GOOD x{class_weight_multipliers[1]:.3f}"
+        )
+        fit_params = TARGET_FIT_PARAMS.get(t, {})
+        if fit_params:
+            print_with_timestamp(f"Applying fit params for {t}: {fit_params}")
+
+        synthetic_frac_value = float(fit_params.get('synthetic_frac', 0.0))
+        if synthetic_ratio and synthetic_ratio > 0 and synthetic_frac_value > 0:
+            print_with_timestamp(
+                f"Disabling in-model synthetic_frac for {t} because dataset-level "
+                f"synthetic_ratio={synthetic_ratio} is already active."
+            )
+            synthetic_frac_value = 0.0
+
+        model.fit(
+            train_df,
+            target_col=t,
+            class_weight_multipliers=class_weight_multipliers,
+            epochs=int(fit_params.get('epochs', 10)),
+            batch_size=int(fit_params.get('batch_size', 64)),
+            upsample_min_bad=int(fit_params.get('upsample_min_bad', 500)),
+            synthetic_frac=synthetic_frac_value,
+            max_bad_fraction=float(fit_params.get('max_bad_fraction', 0.10)),
+            max_bad_weight=float(fit_params.get('max_bad_weight', 3.0)),
+        )
 
         # Save the trained model
         model_filename = os.path.join(MODEL_FOLDER, f'model_{t}.pkl')

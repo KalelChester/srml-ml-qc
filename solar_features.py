@@ -508,9 +508,10 @@ def add_features(df: pd.DataFrame, site_cfg: Optional[Dict] = None) -> pd.DataFr
     # Numeric epoch time (seconds) for numeric models - keep safe if parse failed
     try:
         # Numeric epoch time (seconds) - Explicitly handle NaT
+        ts_int64 = temp['Timestamp_dt'].astype('int64', copy=False)
         temp['Timestamp_Num'] = np.where(
             temp['Timestamp_dt'].notna(),
-            temp['Timestamp_dt'].view('int64') / 1e9, 
+            ts_int64 / 1e9,
             0.0
         )
     except Exception:
@@ -539,6 +540,46 @@ def add_features(df: pd.DataFrame, site_cfg: Optional[Dict] = None) -> pd.DataFr
     # Correlation-based features for anomaly detection
     temp['ghi_ratio'] = ghi_ratio(temp)
     temp['ghi_diff'] = ghi_diff(temp)
+
+    # Physics consistency features focused on DNI/DHI behavior.
+    ghi = temp.get('GHI', pd.Series(0.0, index=temp.index)).astype(float, errors='ignore').fillna(0.0)
+    dni = temp.get('DNI', pd.Series(0.0, index=temp.index)).astype(float, errors='ignore').fillna(0.0)
+    dhi = temp.get('DHI', pd.Series(0.0, index=temp.index)).astype(float, errors='ignore').fillna(0.0)
+    ghi_clear = temp.get('GHI_Clear', pd.Series(0.0, index=temp.index)).astype(float, errors='ignore').fillna(0.0)
+    dni_clear = temp.get('DNI_Clear', pd.Series(0.0, index=temp.index)).astype(float, errors='ignore').fillna(0.0)
+    dhi_clear = temp.get('DHI_Clear', pd.Series(0.0, index=temp.index)).astype(float, errors='ignore').fillna(0.0)
+
+    if 'SZA' not in temp.columns:
+        elevation = temp.get('elevation', pd.Series(0.0, index=temp.index)).astype(float, errors='ignore').fillna(0.0)
+        temp['SZA'] = (90.0 - elevation).clip(lower=0.0, upper=90.0)
+
+    sza = temp.get('SZA', pd.Series(90.0, index=temp.index)).astype(float, errors='ignore').fillna(90.0)
+    cos_sza = np.cos(np.deg2rad(np.clip(sza.to_numpy(dtype=float), 0.0, 89.999)))
+
+    # Ratios to clear-sky expectations and component consistency.
+    temp['dni_clear_ratio'] = (dni / (dni_clear + 1e-3)).clip(0.0, 3.0)
+    temp['dhi_clear_ratio'] = (dhi / (dhi_clear + 1e-3)).clip(0.0, 3.0)
+    temp['dni_ghi_ratio'] = (dni / (ghi + 1e-3)).clip(0.0, 5.0)
+    temp['dhi_ghi_ratio'] = (dhi / (ghi + 1e-3)).clip(0.0, 3.0)
+
+    closure = dhi.to_numpy(dtype=float) + dni.to_numpy(dtype=float) * cos_sza
+    closure_rel_err = np.abs(ghi.to_numpy(dtype=float) - closure) / (np.abs(ghi.to_numpy(dtype=float)) + 20.0)
+    temp['closure_rel_err'] = np.clip(closure_rel_err, 0.0, 3.0)
+    temp['beam_horizontal_consistency'] = np.clip(
+        np.abs((dni.to_numpy(dtype=float) * cos_sza) - np.maximum(ghi.to_numpy(dtype=float) - dhi.to_numpy(dtype=float), 0.0))
+        / (np.abs(ghi.to_numpy(dtype=float)) + 20.0),
+        0.0,
+        3.0,
+    )
+
+    # Keep temperature feature stable across files even when naming differs.
+    if 'Temperature' not in temp.columns:
+        for alt_name in ['Temp', 'T_air', 'Air_Temp', 'TempC']:
+            if alt_name in temp.columns:
+                temp['Temperature'] = pd.to_numeric(temp[alt_name], errors='coerce')
+                break
+        if 'Temperature' not in temp.columns:
+            temp['Temperature'] = 25.0
 
     # Deterministic QC as a feature
     temp['QC_PhysicalFail'] = bs_rn_qc(temp) if 'SZA' in temp.columns else 0
