@@ -1,0 +1,176 @@
+\documentclass[12pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[margin=0.5in]{geometry}
+\usepackage{amsmath, amssymb, amsthm, physics}
+\usepackage{booktabs, hyperref, listings, graphicx, float}
+
+\title{Hybrid Quality Control Flagging Machine Learning Model for the University of Oregon's Solar Radiation Monitoring Lab}
+\author{Kalel Chester, Josh Peterson, Andrew Muehlisen}
+
+\date{March 2026}
+
+\begin{document}
+
+\maketitle
+
+\section*{Introduction}
+
+The University of Oregon's Solar Radiation Monitoring Lab (SRML) has long served as an institution for climatological research, operating a network of meteorological data tracking stations across the Pacific Northwest. At the core of its operations, the SRML collects high-frequency data on Global Horizontal Irradiance (GHI), Direct Normal Irradiance (DNI), and Diffuse Horizontal Irradiance (DHI). While some stations capture additional variables such as wind speed, atmospheric pressure, and ultra-violet B radiation, this project exclusively focuses on validating the core solar irradiance metrics. 
+% Cite: https://doi.org/10.1016/j.engappai.2023.106199
+Accurate, continuous solar irradiance data is critical for a diverse set of real-world applications, ranging from predictive solar energy forecasting and power grid load management to long-term climate research and localized atmospheric studies.
+
+Ensuring the highest standard of data quality within these continuous datastreams is inherently challenging. Traditional quality control (QC) methodologies have predominantly relied on manual, human-driven inspection combined with simple, rule-based threshold algorithms. 
+% Maybe citation here too?
+While functional, these conventional techniques are highly time-consuming, prone to human fatigue, and often struggle to capture the complex, multi-variate patterns characteristic of partial sensor failures, the effects of frost or water accumulation, or novel anomalies. As the volume of data collected by the SRML grows, and as it transitions into a more automated operational model, the need for a scalable and robust validation framework becomes increasingly apparent.
+
+This capstone project seeks to address these limitations by developing an automated machine learning workflow specifically tailored for QC flagging on the SRML's solar irradiance data. The primary motivation is to explore how modern, data-driven techniques can augment physical sensor networks and significantly reduce the manual burden on analysts. By implementing an ensemble, hybrid model architecture that combines a Random Forest, an Isolation Forest, and an Attention-based Recurrent Neural Network (RNN), we aim to move beyond basic human detection capabilities. This approach allows the system to not only catch known hardware failure modes but also identify previously unseen anomalies by contextualizing data across both feature interactions and temporal patterns.
+
+To achieve this, our methodology utilizes a comprehensive pipeline that ingests raw station data, generates astronomically derived clear-sky expectations, and augments the training set with realistic, synthetic sensor errors. These engineered features are subsequently fed into our hybrid model to produce reliable quality probability scores. Finally, a custom graphical user interface allows for a human-in-the-loop review and model training system, maintaining expert oversight while iteratively improving the model's predictive power.
+
+
+\section*{Methods}
+
+\subsection*{Data Collection and Preprocessing}
+The primary dataset for this study originates from the SRML's Seattle tracking station (STW), spanning multiple years of high-frequency records (2023--2025). Measurements of GHI, DNI, and DHI are collected alongside various meteorological parameters at 1-minute intervals. Physically, GHI is measured using a fixed horizontal pyranometer, while DNI and DHI are collected utilizing a tracking pyrheliometer and a shadowband setup, respectively. Because the project commenced with a vast quantity of unflagged historical data, an iterative human-in-the-loop approach was adopted. Initially, a subset of the data was manually labeled by analysts to form a foundational training set. Models trained on this initial set were then deployed to predict labels for the remaining unflagged data, which analysts subsequently reviewed and corrected. This human-in-the-loop cyclical training process gradually expanded the ground-truth dataset and enhanced model robustness.
+
+To extract meaningful signals for the machine learning models, a custom data pipeline was engineered. The pipeline utilizes physics libraries such as \texttt{pvlib} to calculate clear-sky irradiance models for the Seattle site. These physically derived expectations serve as baseline comparisons for the actual sensor readings, allowing the models to evaluate irradiance deviations dynamically without arbitrarily altering the native timestamps.
+
+\subsection*{Data Augmentation and Synthetic Error Injection}
+A significant challenge in predictive quality control is the severe class imbalance inherent to sensor data; genuine hardware failures are relatively rare compared to periods of normal operation. To ensure the models learn robust decision boundaries for anomalous events, a synthetic error injection module was developed. Realistic sensor faults—such as simulated sensor cleaning events, reduced feature redouts caused by dust accumulation or shade, and moisture magnification effects like water droplets—were procedurally introduced into the training data. These injections were context-aware, utilizing the calculated solar zenith angles to ensure errors like droplet magnification only appeared at physically appropriate times.
+
+\subsection*{Hybrid Machine Learning Architecture}
+The core of the QC system is a three-pronged ensemble architecture built in python, leveraging \texttt{scikit-learn} and \texttt{JAX/Flax}.
+This architecture processes the engineered features through three complementary models that act as a pipeline for the final model output:
+
+\begin{itemize}
+    \item \textbf{Random Forest Classifier:} Serving as the baseline supervised learner, a Random Forest with 50 estimators captures complex, non-linear interactions between the different irradiance variables and clear-sky deviations. It utilizes class weighting to handle data imbalances and applies probability calibration to output reliable confidence scores.
+    
+    \item \textbf{Isolation Forest:} Functioning as an unsupervised anomaly detector, an Isolation Forest with 128 estimators is trained exclusively on validated ``good'' data. Its primary role is to act as a safety net, calculating anomaly scores to flag novel, out-of-distribution failure modes that were neither present in the human-labeled data nor generated by the synthetic error injections.
+    
+    \item \textbf{Attention-Based Recurrent Neural Network (RNN):} To explicitly capture the time-series nature of daily solar cycles, a deep learning component was constructed using JAX and Flax. The network employs a two layer Gated Recurrent Unit (GRU) with a hidden dimension of 64 and two stacked layers with dimensions of 64 and 32, analyzing continuous 60-step sequence windows (representing one hour of 1-minute data). An integrated temporal attention mechanism allows the network to automatically learn and focus on the most critical time steps, such as rapid cloud cover shifts or dawn/dusk transitions. Dropout regularization (at a rate of 0.2) and residual connections are utilized to prevent overfitting and ensure stable gradient flow during training. 
+\end{itemize}
+
+\subsection*{Deployment and Human-in-the-Loop Integration}
+The entire workflow is orchestrated via automated learning scripts. Once trained, the system performs inference on unseen station data. Importantly, the prediction module defaults to a safe-write philosophy: it writes machine learning predictions back to the output CSVs while strictly preserving any existing manual ``bad'' quality flags, ensuring that prior human validation is never overwritten. Finally, a custom-built graphical user interface (GUI) empowers SRML analysts to visually inspect the model's classifications, review and navigate to least certain underlying probability scores as defined by the model, and easily adjust target flags. This deployment effectively shifts the human's role from low-level data scanning to high-level model supervision.
+
+
+\section*{Results}
+Our hybrid machine learning model for quality control flagging on the SRML's solar irradiance data demonstrate significant improvement compared to traditional rule-based methods, though it has not yet reached a level of performance to place it in consideration for autonomous, unsupervised operation. Test data used for final model evaluation includes a clean, manually flagged version of the first two months of 2026, along with a copy of February 2025 through February 2026 with artificial errors inserted. August 2025 was excluded due to a persistant failure that rendered the data unusable for testing. 
+
+Performance varied significantly depending on the target irradiance metric. The model achieved the highest performance on the Global Horizontal Irradiance (GHI) data, exhibiting strong classification abilities. Conversely, identifying anomalies in Direct Normal Irradiance (DNI) and Diffuse Horizontal Irradiance (DHI) proved to be the most challenging, resulting in lower performance. The results for each model are summarized in Table~\ref{tab:model_performance}, which includes the accuracy, precision, recall, and F1 scores of the models. 
+
+\begin{table}[H]
+      \centering
+      \caption{Model Performance Metrics for GHI, DNI, and DHI}\label{tab:model_performance}
+      \begin{tabular}{lccccccc}
+            \toprule
+            Dataset & Feature & Samples & Agreement & Accuracy & Precision & Recall & F1 \\
+            \midrule
+            Regular & Flag\_GHI & 84835 & 84810/84835 & 0.9997 & 0.9833 & 0.7108 & 0.8252 \\   
+             & Flag\_DNI & 84848 & 84777/84848 & 0.9992 & 0.9242 & 0.4803 & 0.6321 \\
+             & Flag\_DHI & 84725 & 84709/84725 & 0.9998 & 1.0000 & 0.6667 & 0.8000 \\
+            \midrule 
+            Regular & Flag\_GHI & 458658 & 457840/458658 & 0.9982 & 0.9339 & 0.8281 & 0.8778 \\
+             & Flag\_DNI & 427156 & 425919/427156 & 0.9971 & 0.8245 & 0.6079 & 0.6998 \\
+             & Flag\_DHI & 428560 & 427401/428560 & 0.9973 & 0.8503 & 0.6669 & 0.7475 \\
+            \bottomrule
+      \end{tabular}
+\end{table}
+
+\subsection*{Confusion Matrices}
+To further understand the classification behavior across the three irradiances, we generated target-level confusion matrices (Figure~\ref{fig:confusion_matrices}). On the regular files, DNI exhibits a significant concentration of false negatives, predicting regular data where the human labelers marked an anomoly. Meanwhile DHI shows a concentration of false positives, marking human-labled good data as bad. Conversely, GHI shows a more balanced distribution, with a stronger true classification and minimal off-diagonal spread compared to the other models. 
+The injected error matrices demonstrate that when synthetic, technically non-physical (simulated) anomalies are introduced, the model struggles accurately capture them across all targets compared to the regular data, indicating that the model is better trained to identify the more realistic, often more obvious physically grounded anomalies that human labelers are more likely to identify. 
+
+\begin{figure}[H]
+      \centering
+      \includegraphics[width=0.8\textwidth]{plot_target_confusion_matrices_Confusion_Matrices_-_Regular_Files.png} 
+      \includegraphics[width=0.8\textwidth]{plot_target_confusion_matrices_Confusion_Matrices_-_Injected_Error_Files.png} 
+      \caption{Target-Level Confusion Matrices for GHI, DNI, and DHI}\label{fig:confusion_matrices}
+\end{figure}
+
+\subsection*{ROC Curves}
+The ROC curves for each target are depicted in Figure~\ref{fig:roc_curves}, illustrating the trade-off between true positive rates and false positive rates. The curves clearly illustrate that the Global Horizontal Irradiance (GHI) model exhibits the strongest bow toward the top left, achieving the highest Area Under the Curve (AUC) across both datasets. Diffuse Horizontal Irradiance (DHI) follows closely behind, while Direct Normal Irradiance (DNI), yields a noticeably shallower curve. This reflects the DNI model's struggle to separate transient noise from true tracking anomalies. Furthermore, comparing the regular files to the injected error files reveals wider, cleaner AUC visual margins on the injected data, confirming the ensemble's higher sensitivity to objective physical faults.
+
+\begin{figure}[H]
+      \centering
+      \includegraphics[width=0.48\textwidth]{plot_target_roc_curves_ROC_Curves_-_Regular_Files.png}
+      \includegraphics[width=0.48\textwidth]{plot_target_roc_curves_ROC_Curves_-_Injected_Error_Files.png}
+      \caption{Target-Level ROC Curves}\label{fig:roc_curves}
+\end{figure}
+
+\subsection*{Time-Series Diagnostics}
+Because the model is designed to capture temporal patterns, it is crucial to evaluate its performance with respect to the different times that it operates in. To do this, we can view time series diagnostics that plot the model's predicted anomaly rates across different hours of the day and months of the year, comparing them to the actual error frequencies (Figure~\ref{fig:ts_diagnostics_hour} and Figure~\ref{fig:ts_diagnostics_month}). This allows us to assess whether the model is well-calibrated across different temporal contexts and whether it captures known patterns of sensor behavior, such as increased anomalies during dawn/dusk transitions or seasonal variations in sensor performance. 
+
+The plots reveal that the model's daily predicted anomaly rates align well with the actual error frequencies. The one significant exception is the large seperation that GHI shows at around 19:00. This is likely due to the fact that the model is overfitting to a specific pattern in the training data, where there are more anomalies during this time period of summer evenings. This could be caused by a variety of factors, such as a heightened number of obstructing objects (e.g. telephone poles and trees) or environmental conditions that affect the GHI sensor's performance during this time. The monthly diagnostics show that the models perform relatively consistently for all seasons, matching the slight noisy fit seen in the hourly diagnostics.
+
+\begin{figure}[H]
+      \centering
+      \includegraphics[width=0.8\textwidth]{plot_hourly_bad_counts_injected_multiplot.png}
+      \caption{Time-Series Diagnostics: Error Count by Hour}\label{fig:ts_diagnostics_hour}
+\end{figure}
+
+\begin{figure}[H]
+      \centering
+      \includegraphics[width=0.8\textwidth]{plot_monthly_bad_counts_injected_multiplot.png}
+      \caption{Time-Series Diagnostics: Error Count by Month}\label{fig:ts_diagnostics_month}
+\end{figure}
+
+
+\section*{Discussion}
+
+The results highlight both the potential and the inherent complexities of applying automated machine learning to meteorological quality control. As outlined in the introduction, the goal was to augment the existing human-driven workflow by capturing multi-variate and temporal anomalies. The performance of the GHI and DHI flagging validates our hybrid architecture's ability to utilize clear-sky baseline expectations and synthetic error injections to establish robust decision boundaries for stable physical metrics. 
+
+However, the poor performance of the DNI and DHI models reveal an important implication about the physical nature of these sensors. Because DNI requires a tracking pyrheliometer to face the sun directly, it is highly sensitive to subtle mechanical tracking misalignments, transient cloud edges, and atmospheric aerosols. These factors create highly volatile data signatures that often mimic anomalies, causing the model to struggle with false properly identified anomolies. Meanwhile, anomalous DHI values are much more challening to identify because of their comparatively low magnitudes, and translation to obvious anomaly signaling features. This leads to the DHI model identifying more false positives in the regular data. By design, the model tends towards conservatism, opting to err on the side of caution with respect to flagging points as anomalies. However, we can see this behavior differs between the regular and error injected datasets, with the model predicting more false positives on the regular data and more false negatives on the error injected data. The physical reality of the DNI tracking sensors directly correlates with the elevated error rates observed in the confusion matrices. Because the pyrheliometer must maintain precise alignment with the sun's disc, it is susceptible to micro-misalignments. These physical phenomena create sharp, high-frequency signal drops that the model struggles to corretly differentiate from sensor failures. 
+
+\begin{figure}[H]
+      \centering
+      \includegraphics[width=0.48\textwidth]{plot_focus_window_2026-02-01_2026-02-01_Window_Regular_Files.png}
+      \includegraphics[width=0.48\textwidth]{plot_focus_window_2026-02-06_2026-02-06_Window_Regular_Files.png}
+      \caption{Misaligned Manual vs.\ Model Identified Anomalies}\label{fig:focus_window}
+\end{figure}
+
+It is worth noting that while the model's performance as determined by traditional metrics is weak, the practical utility of the model in a human-in-the-loop context is still significant. While the model does not always capture the full range, or correct causal features of an anomalous event, almost all groups of bad points are identified. In figure \ref{fig:focus_window}, we can see two examples of such days comparing model predictions to human labels. 
+
+In the first example, the model correctly identifies a cluster of anomalous points in the GHI and DNI data, but it falsely assumes that the DHI data should be flagged to. This connects to a greater concern of this project, where many anamalous events are easily recognized, but identifying the specific irradiance feature to target the blame on can be challenging or worse, up to a matter of opinion. Further review of the data suggests that there are many points where the model makes a prediction that is likely more objective in it's classification than the analyst. In the second example, the model again identifies a cluster of anomalies, but it fails to identify the proper bounds and responsible features. This suggests that while the model is effective at identifying potential anomalies, it may also be prone to false negatives, particularly in cases where the underlying data is noisy or where the anomalies do not conform to typical patterns. By providing a GUI that allows analysts to easily review predicted probabilities and adjust flags, the model can still substantially reduce the manual burden on researchers. Even if the model fails to capture all anomalies, it can still be valuable in guiding analysts to the most uncertain data points, allowing them to focus their attention where it is most needed. This highlights the importance of considering the practical application of machine learning models in real-world contexts, rather than solely relying on traditional performance metrics.
+
+In critiquing our work, the primary limitations lay in the scope and complexity of the synthetic error injections, along with the quality of manually flagged data for model training. While simulating dust accumulation and droplet magnification was effective for stationary sensors, it may not have adequately represented the complex errors unique to tracking sensors. A more sophisticated physical simulation of tracking failure modes could have improved the DNI recall. Additionally, the performance of the model is greatly limited on the quality of training data. Because of the noisy nature of the raw data and the rarity of true anomalies, the initial human-labeled dataset was relatively small and contained labeling inconsistencies. This could have led to the model learning suboptimal decision boundaries, particularly for the more volatile DNI data. A larger, more consistently labeled dataset would likely improve model performance across all targets. Lastly, while the Attention-based RNN provided temporal context, it also introduced significant computational overhead, which leads to challenges in training and operating the model, and could bottleneck real-time inference during potential broader multi-station deployments.
+
+\section*{Conclusion}
+
+This capstone successfully developed and deployed a hybrid machine learning quality control pipeline for the University of Oregon's Solar Radiation Monitoring Lab. By integrating a Random Forest, an Isolation Forest, and an Attention-based RNN, the project moved beyond traditional rule-based flagging to identify complex, time-series irradiance anomalies. While automated flagging for highly sensitive metrics like Direct Normal Irradiance remains challenging, the system achieved high precision and excellent accuracy.\@
+Ultimately, by optimizing for recall and wrapping the models in a custom analyst GUI, the system succeeded in its primary goal: substantially reducing the manual burden on researchers while ensuring expert oversight remains at the center of the SRML's data validation process.
+
+\section*{Supporting Information}
+
+\begin{thebibliography}{9}
+
+\bibitem{tensorflow2015-whitepaper}
+Abadi, M., Agarwal, A., Barham, P., Brevdo, E., Chen, Z., Citro, C., Corrado, G. S., Davis, A., Dean, J., Devin, M., ... \& Zheng, X. (2015). TensorFlow: Large-scale machine learning on heterogeneous systems. \url{https://www.tensorflow.org/}
+
+\bibitem{jax2018github}
+Bradbury, J., Frostig, R., Hawkins, P., Johnson, M. J., Leary, C., Maclaurin, D., Necula, G., Paszke, A., VanderPlas, J., Wanderman-Milne, S., \& Zhang, Q. (2018). JAX: composable transformations of Python+NumPy programs (Version 0.3.13) [Computer software]. \url{http://github.com/google/jax}
+
+\bibitem{flax2020github}
+Heek, J., Levskaya, A., Oliver, A., Ritter, M., Rondepierre, L., Steiner, A., \& van Zee, M. (2020). Flax: A neural network library and ecosystem for JAX [Computer software]. \url{http://github.com/google/flax}
+
+\bibitem{deepmind2020jax}
+DeepMind, Babuschkin, I., Baumli, K., Bell, A., Bhupatiraju, S., Bruce, J., Buchlovsky, P., Budden, D., Cai, T., Clark, A., Danihelka, I., ... \& Viola, F. (2020). The DeepMind JAX Ecosystem [Computer software]. \url{http://github.com/google-deepmind}
+
+\bibitem{anderson2023pvlib}
+Anderson, K., Hansen, C., Holmgren, W., Jensen, A., Mikofski, M., \& Driesse, A. (2023). pvlib python: 2023 project update. \textit{Journal of Open Source Software, 8}(92), 5994. \url{https://doi.org/10.21105/joss.05994}
+
+\bibitem{harris2020array}
+Harris, C. R., Millman, K. J., van der Walt, S. J., Gommers, R., Virtanen, P., Cournapeau, D., Wieser, E., Taylor, J., Berg, S., Smith, N. J., ... \& Oliphant, T. E. (2020). Array programming with NumPy. \textit{Nature, 585}(7825), 357--362. \url{https://doi.org/10.1038/s41586-020-2649-2}
+
+\bibitem{mckinney2010data}
+McKinney, W. (2010). Data Structures for Statistical Computing in Python. In \textit{Proceedings of the 9th Python in Science Conference} (pp. 51--56).
+
+\bibitem{pedregosa2011scikit}
+Pedregosa, F., Varoquaux, G., Gramfort, A., Michel, V., Thirion, B., Grisel, O., Blondel, M., Prettenhofer, P., Weiss, R., Dubourg, V., ... \& Duchesnay, E. (2011). Scikit-learn: Machine Learning in Python. \textit{Journal of Machine Learning Research, 12}, 2825--2830.
+
+\bibitem{vignola2013university}
+Vignola, F., \& Andreas, A. (2013). \textit{University of Oregon: Solar Radiation Monitoring Lab (Data)}. NREL Report No. DA-5500-64452. \url{https://doi.org/10.7799/1183467}
+
+\end{thebibliography}
+
+\end{document}
