@@ -83,6 +83,14 @@ def subroutine_main_automated_qc(comprehensive_location):
     Save the comprehensive format file once you are done. 
     '''
 
+    # Basic input validation to avoid opaque indexing errors downstream.
+    file_ext = comprehensive_location.lower().rsplit('.', 1)[-1] if '.' in comprehensive_location else ''
+    if file_ext != 'csv':
+        raise ValueError(
+            f"Expected a QC CSV file, got: {comprehensive_location}. "
+            "If you selected a manifest file (e.g., *_manifest.json), choose the matching *_QC.csv or *_errored.csv instead."
+        )
+
     # Load the comprehensive file
     # The metadata section (rows 0-43) has inconsistent column counts
     # Read with error_bad_lines to handle this gracefully
@@ -90,8 +98,22 @@ def subroutine_main_automated_qc(comprehensive_location):
         warnings.simplefilter("ignore")
         df_full = pd.read_csv(comprehensive_location, header=None, dtype=str, 
                               on_bad_lines='skip', engine='c')
+
+    if df_full.empty:
+        raise ValueError(f"Loaded file is empty or unreadable as CSV: {comprehensive_location}")
+
     df_header = df_full.iloc[:44].copy()
     df = df_full.iloc[44:].copy()  # Make a copy to avoid SettingWithCopyWarning
+    # Keep legacy object semantics for downstream assignment-heavy code paths.
+    # Recent pandas versions can infer nullable StringDtype, which rejects float assignment.
+    df = df.astype(object)
+
+    if df.shape[1] < 8:
+        raise ValueError(
+            f"Unexpected CSV structure for comprehensive QC format: {comprehensive_location} "
+            f"(detected shape after header split: rows={df.shape[0]}, cols={df.shape[1]}). "
+            "Expected at least 8 columns including timestamp, solar geometry, irradiance, and flags."
+        )
 
     # The EUO PIR columns got mixed up. 
     # Change the order of them
@@ -165,8 +187,10 @@ def subroutine_main_automated_qc(comprehensive_location):
         
         index_column = index_column + 2
 
-    # Put the header and data back together in one array
-    df = np.concatenate((np.array(df_header), np.array(df)), axis=0)
+    # Put header and data back together as a DataFrame (object dtype),
+    # preserving assignment-compatible behavior expected by SRML_ManualQC.
+    df_combined = pd.DataFrame(
+        np.concatenate((np.array(df_header), np.array(df)), axis=0)
+    ).astype(object)
 
-    
-    return df, df_header
+    return df_combined, df_header

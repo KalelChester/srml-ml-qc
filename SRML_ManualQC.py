@@ -251,7 +251,12 @@ def main(test_file=None):
         sys.exit(f"File not found: {comprehensive_location}")
     
     # Get data
-    df, df_header = SRML_Data.subroutine_main_automated_qc(comprehensive_location)
+    try:
+        df, df_header = SRML_Data.subroutine_main_automated_qc(comprehensive_location)
+    except Exception as exc:
+        log_button_click(f'Failed loading file: {exc}')
+        close_log()
+        sys.exit(f"Failed to load selected file: {exc}")
     log_button_click(f'Data shape after loading: {df.shape}')
     
     # Format dataframe
@@ -388,13 +393,29 @@ def load_models_and_predict(df):
 def select_file():
     """Prompt user to select a file for QC."""
     try:
-        file_path = filedialog.askopenfilename(title="Select file to QC")
+        file_path = filedialog.askopenfilename(
+            title="Select file to QC",
+            filetypes=[
+                ("QC CSV files", "*.csv"),
+                ("All files", "*.*"),
+            ],
+        )
         if not file_path:
             print("\n" + "="*70)
             print("File dialog returned no file. Running in terminal environment?")
             print("Usage: python SRML_ManualQC.py <path_to_file>")
             print("Example: python SRML_ManualQC.py data\\STW_2024\\STW_2024-01_QC.csv")
             print("="*70 + "\n")
+            return file_path
+
+        if not file_path.lower().endswith('.csv'):
+            messagebox.showerror(
+                "Invalid file type",
+                "Please select a CSV file (for example *_QC.csv or *_errored.csv).\n"
+                "Manifest JSON files are not valid QC input files."
+            )
+            return None
+
         return file_path
     except Exception as e:
         print(f"Error in file dialog: {e}")
