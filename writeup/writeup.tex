@@ -103,7 +103,7 @@ The core of the QC system is a pipeline architecture built in Python using ``sci
 \end{itemize}
 
 \subsection*{Deployment and Human-in-the-Loop Integration}
-The entire workflow is orchestrated via automated learning scripts. Once trained, the system performs inference on unseen station data. Importantly, the prediction module defaults to a safe-write philosophy: it writes machine learning predictions back to the output CSVs while strictly preserving any existing manual ``bad'' quality flags, ensuring that prior human validation is never overwritten. Finally, a custom-built graphical user interface (GUI) empowers SRML analysts to visually inspect the model's classifications, review and navigate to least certain underlying probability scores as defined by the model, and easily adjust target flags. This deployment shifts the human's role from low-level data scanning to high-level model supervision.
+The entire workflow is orchestrated via automated learning scripts. Once trained, the system performs inference on unseen station data. Importantly, the prediction module defaults to a safe-write philosophy: it writes machine learning predictions back to the output CSVs while strictly preserving any existing manual ``bad'' quality flags, ensuring that prior human validation is never overwritten. Finally, a custom-built graphical user interface (GUI) empowers SRML analysts to visually inspect the model's classifications, review and navigate to least certain underlying probability scores as defined by the model, and easily adjust target flags. This deployment shifts the human's role from low-level data scanning to high-level model supervision. The complete project implementation and reproducible pipeline code are available in the public repository \\cite{chester2026srmlmlqc}.
 
 \subsection*{Seasonal Performance}
 Because the model is designed to capture temporal patterns, it is crucial to evaluate its performance across the different time resolutions at which it operates. To do this, we can view time-series diagnostics that plot the model's predicted anomaly rates across hours of the day and months of the year, comparing them to the actual error frequencies (Figures \ref{fig:ts_diagnostics_hour} and \ref{fig:ts_diagnostics_month}). This allows us to assess whether the model is well-calibrated across different temporal contexts and whether it captures known patterns of sensor behavior, such as increased anomalies during dawn/dusk transitions or seasonal variations in sensor performance.
@@ -209,6 +209,9 @@ The greatest limitations to this project's objectives lie in the scope and compl
 
 This project successfully developed and deployed a hybrid machine-learning quality-control pipeline for the University of Oregon's Solar Radiation Monitoring Lab. By integrating a Random Forest, an Isolation Forest, and an Attention-based RNN, the project moved beyond traditional rule-based flagging to identify complex, time-series irradiance anomalies. While automated flagging of highly sensitive metrics such as DNI remains challenging, the system achieved high precision and strong overall accuracy. Ultimately, by optimizing for recall and wrapping the models in a custom analyst GUI, the system achieved its primary goal: substantially reducing the manual burden on researchers while ensuring expert oversight remains central to the SRML's data validation process.
 
+\section*{Code Availability}
+The source code for the full machine-learning quality-control pipeline, including data preprocessing, synthetic error injection, model training, inference, and analysis scripts, is publicly available at GitHub \\cite{chester2026srmlmlqc}.
+
 \pagebreak 
 
 \begin{thebibliography}{99}
@@ -233,6 +236,9 @@ Heek, J., Levskaya, A., Oliver, A., Ritter, M., Rondepierre, L., Steiner, A., \&
 
 \bibitem{maxwell1993users}
 Maxwell, G., Stoffel, T., Rymes, M., \& Myers, D. (1993). \textit{Users Manual for SERI QC Software: Assessing the Quality of Solar Radiation Data} (No. NREL/TP-463-5608). National Renewable Energy Lab. (NREL), Golden, CO (United States).
+
+\bibitem{chester2026srmlmlqc}
+Chester, K. (2026). \textit{srml-ml-qc} [Computer software]. GitHub. \url{https://github.com/KalelChester/srml-ml-qc}
 
 \bibitem{mckinney2010data}
 McKinney, W. (2010). Data Structures for Statistical Computing in Python. In \textit{Proceedings of the 9th Python in Science Conference} (pp. 51--56).
